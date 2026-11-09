@@ -1,0 +1,77 @@
+// Contract: BACKEND_SCOPE.md §3.
+// - Money columns are integer cents.
+// - CHECK constraints and the citext/pgcrypto extensions live in the migration SQL:
+//   Prisma does not model CHECKs, and it ignores (never drops) them.
+// - Product names are `citext`, so the (user_id, name) unique index is case-insensitive
+//   (the spec's `lower(name)` unique index). Length (<= 32) is enforced by a CHECK.
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+    id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    clerk_user_id String   @unique
+    timezone      String   @default("America/Sao_Paulo")
+    created_at    DateTime @default(now()) @db.Timestamptz(6)
+    updated_at    DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+    Products  Product[]
+    Sales     Sale[]
+    SalesGoal SalesGoal?
+
+    @@map("users")
+}
+
+model Product {
+    id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    user_id                String   @db.Uuid
+    name                   String   @db.Citext
+    price_cents            Int
+    preparation_cost_cents Int      @default(0)
+    created_at             DateTime @default(now()) @db.Timestamptz(6)
+    updated_at             DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+    User  User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    Sales Sale[]
+
+    @@unique([user_id, name], map: "products_user_name_unique")
+    @@index([user_id, created_at(sort: Desc)], map: "products_user_created_idx")
+    @@map("products")
+}
+
+model Sale {
+    id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    user_id               String   @db.Uuid
+    product_id            String?  @db.Uuid
+    product_name_snapshot String   @db.VarChar(32)
+    unit_price_cents      Int
+    quantity              Int
+    occurred_at           DateTime @db.Timestamptz(6)
+    created_at            DateTime @default(now()) @db.Timestamptz(6)
+    updated_at            DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+    User    User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+    Product Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
+
+    @@index([user_id, occurred_at(sort: Desc)], map: "sales_user_occurred_idx")
+    @@index([user_id, product_id], map: "sales_user_product_idx")
+    @@map("sales")
+}
+
+model SalesGoal {
+    id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    user_id      String   @unique @db.Uuid
+    amount_cents Int
+    created_at   DateTime @default(now()) @db.Timestamptz(6)
+    updated_at   DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+    User User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+    @@map("sales_goals")
+}
