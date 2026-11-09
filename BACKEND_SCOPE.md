@@ -21,7 +21,7 @@ Documento de implementação para o backend real do sistema. O frontend atual us
 }
 ```
 
-Usar `400` para entrada inválida, `401` sem autenticação, `403` sem permissão, `404` para recurso inexistente do usuário, `409` para conflito e `500` para falha inesperada. Nunca retornar stack trace, segredo ou prompt interno.
+Usar `400` para entrada inválida, `401` sem autenticação, `403` sem permissão, `404` para recurso inexistente do usuário, `409` para conflito, `429` para excesso de requisições simultâneas e `500` para falha inesperada. Nunca retornar stack trace, segredo ou prompt interno.
 
 ## 2. Rotas por página
 
@@ -161,7 +161,7 @@ Além de `GET /api/products` descrito na Home:
 
 Corpo: `{ "name": "Brownie", "price": 8.0, "preparationCost": 2.5 }`.
 
-Validar nome não vazio (máximo 32 caracteres, conforme formulário), preço maior que zero, custo maior ou igual a zero, ambos finitos e com no máximo duas casas decimais. Resposta `201` com o produto criado.
+Validar nome não vazio (máximo 32 caracteres, conforme formulário), preço maior que zero, custo maior ou igual a zero, ambos finitos e com no máximo duas casas decimais. Resposta `201` com o produto criado. Cada usuário pode ter no máximo 500 produtos; acima disso, `409` com `PRODUCT_LIMIT_REACHED`.
 
 #### `PATCH /api/products/:id`
 
@@ -186,7 +186,7 @@ Corpo:
 }
 ```
 
-Aceitar até 20 mensagens, papéis `user` e `assistant`, conteúdo não vazio de até 4.000 caracteres, e exigir que a última mensagem seja do usuário. Não aceitar mensagens de sistema enviadas pelo cliente.
+Aceitar até 20 mensagens, papéis `user` e `assistant`, conteúdo não vazio de até 4.000 caracteres, e exigir que a última mensagem seja do usuário. Não aceitar mensagens de sistema enviadas pelo cliente. Limitar as perguntas em andamento (padrão: 1 por usuário e 4 no processo, configuráveis); acima disso, `429` com `TOO_MANY_REQUESTS`.
 
 Resposta `200`: `{ "reply": "..." }`.
 
@@ -302,20 +302,19 @@ Invoke-RestMethod http://localhost:11434/api/tags
 
 O endpoint deve listar `llama3.2` e `embeddinggemma`. Se o aplicativo Ollama não estiver em execução, iniciar `ollama serve` em um terminal separado e mantê-lo aberto.
 
-4. Configurar o arquivo local `backend/.env` (não versionar segredos):
+4. Copiar `backend/.env.example` para `backend/.env` e preencher os valores (não versionar segredos). Além de `PORT`, `OLLAMA_URL`, `CHAT_MODEL` e `EMBEDDING_MODEL`, a API exige `DATABASE_URL`, `FRONTEND_URL`, `CLERK_SECRET_KEY` e `CLERK_ISSUER`; em produção também `CLERK_JWT_KEY`. O próprio `.env.example` descreve cada variável.
 
-```env
-PORT=3001
-OLLAMA_URL=http://localhost:11434
-CHAT_MODEL=llama3.2
-EMBEDDING_MODEL=embeddinggemma
+```powershell
+Copy-Item backend/.env.example backend/.env
 ```
 
-5. Com as dependências do backend instaladas, iniciar a API:
+5. Com as dependências do backend instaladas, subir o PostgreSQL (`backend/docker-compose.yml`), aplicar as migrações e iniciar a API:
 
 ```powershell
 Set-Location backend
-npm run dev
+docker compose up -d postgres
+npm run migrate:deploy
+npm run start:dev
 ```
 
 Em outro terminal, testar a API:
