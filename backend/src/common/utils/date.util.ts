@@ -24,37 +24,44 @@ export type TimeOfDay = {
     milliseconds: number;
 };
 
+type CalendarDateParts = { year: number; month: number; day: number };
+
+/** Parts of a real date written as `YYYY-MM-DD`, whatever its year; null for anything else. */
+function realDateParts(value: string): CalendarDateParts | null {
+    const match = CALENDAR_DATE_PATTERN.exec(value);
+    if (!match) {
+        return null;
+    }
+
+    const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    const date = new Date(Date.UTC(year, month - 1, day));
+
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+        ? { year, month, day }
+        : null;
+}
+
 /** True only for a real calendar date in `YYYY-MM-DD` (rejects `2026-02-30`, `2026-2-3`, `20260203`). */
 export function isCalendarDate(value: unknown): value is string {
     if (typeof value !== 'string') {
         return false;
     }
 
-    const match = CALENDAR_DATE_PATTERN.exec(value);
-    if (!match) {
-        return false;
-    }
-
-    const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-
     // Ranges are half-open and end at the next day's start; for 9999-12-31 that day (10000-01-01)
     // has no YYYY-MM-DD form, which made GET /api/sales?endDate=9999-12-31 a 500.
-    if (year > MAX_CALENDAR_YEAR) {
-        return false;
-    }
-
-    const date = new Date(Date.UTC(year, month - 1, day));
-
-    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+    const parts = realDateParts(value);
+    return parts !== null && parts.year <= MAX_CALENDAR_YEAR;
 }
 
-function parseCalendarDate(date: string): { year: number; month: number; day: number } {
-    if (!isCalendarDate(date)) {
+function parseCalendarDate(date: string): CalendarDateParts {
+    // Deliberately not `isCalendarDate`: the exclusive end of a range that stops on the last accepted
+    // day (MAX_CALENDAR_YEAR-12-31) is 9999-01-01, and it must still resolve to an instant.
+    const parts = realDateParts(date);
+    if (!parts) {
         throw new RangeError(`Invalid calendar date: ${date}`);
     }
 
-    const [year, month, day] = date.split('-').map(Number) as [number, number, number];
-    return { year, month, day };
+    return parts;
 }
 
 function utcMidnight(date: string): Date {
@@ -75,6 +82,25 @@ export function addDays(date: string, days: number): string {
 export function mondayOf(date: string): string {
     const weekday = utcMidnight(date).getUTCDay(); // 0 = Sunday
     return addDays(date, -((weekday + 6) % 7));
+}
+
+/** ISO 8601 weekday of a calendar date: 1 = Monday … 7 = Sunday (not JavaScript's `getDay()`). */
+export function isoWeekdayOf(date: string): number {
+    return ((utcMidnight(date).getUTCDay() + 6) % 7) + 1;
+}
+
+/** Whole days from `from` to `to` (`daysBetween('2026-10-31', '2026-11-02') === 2`); negative when `to` is earlier. */
+export function daysBetween(from: string, to: string): number {
+    return Math.round((utcMidnight(to).getTime() - utcMidnight(from).getTime()) / DAY_MS);
+}
+
+/** First and last calendar date of `month` (1–12) of `year`, leap years included. */
+export function monthDateRange(year: number, month: number): { from: string; to: string } {
+    // Day 0 of the next month is the last day of this one.
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const prefix = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
+
+    return { from: `${prefix}-01`, to: `${prefix}-${String(lastDay).padStart(2, '0')}` };
 }
 
 /** Lexicographic compare works for `YYYY-MM-DD`; returns <0, 0, >0. */

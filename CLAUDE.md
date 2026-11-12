@@ -108,16 +108,26 @@ Infrastructure adapters live in `src/infrastructure/<name>/`: `prisma`, `clerk` 
 - **Dates.** Calendar dates (`YYYY-MM-DD`) are wall-calendar values in the user's `users.timezone` (default `America/Sao_Paulo`); persisted instants are `timestamptz`.
   - Use only `src/common/utils/date.util.ts`, with `AuthUser.timezone`.
   - Day and range queries are half-open `[start, end)`, from `localDateRange`.
-  - Weeks start on Monday (`mondayOf`).
+  - Weeks start on Monday (`mondayOf`); weekdays are ISO numbers, 1 = Monday … 7 = Sunday (`isoWeekdayOf`), never `getDay()`.
+  - The year cap (`MAX_CALENDAR_YEAR`, 9998) applies to input dates only (`isCalendarDate`). The internal parse also accepts the exclusive end of a range, `9999-01-01`; reusing the capped check there made `?endDate=9998-12-31` a 500.
   - Never use server-local `Date` getters or setters.
-- **Sale snapshots.** A sale stores `product_name_snapshot` and `unit_price_cents`, captured from the product in the same transaction as the write.
-  - Editing a product never reprices past sales.
+- **Sale snapshots.** A sale stores `product_name_snapshot`, `unit_price_cents` and `unit_cost_cents` (the product's preparation cost), captured from the product in the same transaction as the write.
+  - Editing a product never reprices or re-costs past sales. A sale recorded while the product's cost was 0 keeps cost 0 after the cost is filled in; 0 also means "cost not informed".
+  - `lockProductForSnapshot` is a raw query cast to `ProductSnapshot`: a field missing from its SELECT list still compiles and silently reaches the sale as `undefined`. Add the column to the SELECT whenever the type grows.
   - Deleting a product sets `sales.product_id` to NULL (`ON DELETE SET NULL`); it never deletes sales.
   - A PATCH re-snapshots only when `productId` actually changes.
 - **Pagination.** `GET /api/sales` uses keyset pagination on `(occurred_at, id)`, taking `limit` (max 100) and an opaque `cursor` (`src/common/pagination/cursor-page.ts`). It always returns `{ items, nextCursor }`.
   - Unfiltered, it pages by 50 by default ("sem filtros, retornar todas as vendas paginadas").
   - With `date` or `startDate`/`endDate`, it returns every match, because the Home day and week totals depend on it. Pagination applies only if the client sends `limit` or `cursor`.
   - Products are not paginated; each user can have at most 500 (`409 PRODUCT_LIMIT_REACHED`).
+- **Dashboard metrics** (`GET /api/dashboard/metrics`, `dashboard/utils/sales-metrics.util.ts`).
+  - Two scopes in one response: "the period" (the year, or one month of it) for totals, averages, best sellers, weekday and week-of-month; the whole year, always, for `monthlyProfit` and `annualProfit`.
+  - One SQL query returns the year's totals per local day; everything else is pure TypeScript over those rows (at most 366), so the month view and the year view can't disagree. Best sellers are a second query, over the period.
+  - `DashboardService.getMetrics` is the only place that reads the clock: the default year is the current year in the user's timezone, so the query DTO has no default for it.
+  - "Week of the month" is a block of days of the month (1–7, 8–14, 15–21, 22–28, 29–31), unrelated to Monday weeks.
+  - `bestWeekday` and `bestWeekOfMonth` are elected by average (per occurrence of the weekday inside the selling span; per month in which the block sold), compared exactly in BigInt, not by total: totals favour whatever the calendar gave more of.
+  - A product in the ranking is its resolved name, case-folded by the database's `lower()`: the current catalog name while the sale still points to a product, else the snapshot. The integration cluster runs with `--locale=C`, which does not fold accented letters; grouping tests must differ only in ASCII case.
+  - `revenueWithoutCost` is the revenue of sales with cost 0, returned so the screen can say the profit is overstated.
 - **Chat cancellation.** The chat controller aborts an `AbortController` when the response closes before `writableEnded`.
   - The same signal reaches context building, embeddings and the Ollama call.
   - Aborts throw `RequestAbortedError`. The filter writes nothing to a closed connection and does not log aborts as failures.
@@ -126,6 +136,7 @@ Infrastructure adapters live in `src/infrastructure/<name>/`: `prisma`, `clerk` 
 - **Chat context.** It is built only from the authenticated user's products, sales and goal (`ChatContextPrismaRepository`).
   - Above a small catalog size, products are ranked by embedding cosine similarity, with a bounded in-process LRU of product embeddings.
   - The pt-BR system prompt treats user messages and product names as untrusted data.
+  - Known gap: the assistant only sees each product's current preparation cost, groups products by id and ranks best sellers by revenue, so its profit and "best seller" answers can differ from the dashboard metrics (cost stored on each sale, grouping by resolved name, ranking by units).
 
 ### Schema notes
 
@@ -133,6 +144,7 @@ Infrastructure adapters live in `src/infrastructure/<name>/`: `prisma`, `clerk` 
 
 - Product names are `citext` with a unique `(user_id, name)`, which is the spec's case-insensitive `lower(name)` index. A violation maps to `409 PRODUCT_NAME_CONFLICT`.
 - CHECK constraints and the `citext`/`pgcrypto` extensions live in the migration SQL. Prisma doesn't model them and never drops them.
+- `20261112000000_sale_unit_cost` is hand-written: it adds `sales.unit_cost_cents` (NOT NULL DEFAULT 0, CHECK `>= 0`) and backfills it with each product's cost at migration time; sales whose product was already deleted keep 0.
 - When adding a migration, keep those parts by hand-editing the generated SQL if needed.
 
 ### Tests
@@ -165,5 +177,7 @@ Stack: React 19, Vite 8, TypeScript, React Router 7, Clerk auth, Tailwind 4 and 
 
 - **Auth token**: the frontend sends no Clerk session token yet. Every backend route except `/api/health` returns 401 without one.
 - **Error shape**: the chat drawer reads errors as `{ error: string }`; the API returns `{ error: { code, message, details? } }`.
-- **Sale fields**: the API's sale is `{ id, productId, productName, unitPrice, quantity, total, date, time }`; the frontend type uses `price`.
+- **Sale fields**: the API's sale is `{ id, productId, productName, unitPrice, unitCost, quantity, total, profit, date, time }`; the frontend type uses `price`.
+- **Home profit**: Home looks up the catalog's current `preparationCost` by product name. With the API it must sum each sale's own `profit` instead, or it will disagree with the dashboard.
+- **Dashboard metrics**: the Dashboard page computes its two charts from localStorage and does not call `GET /api/dashboard` or `GET /api/dashboard/metrics` yet.
 - **Sale list**: `GET /api/sales` is paginated (`nextCursor`); load further pages where the UI needs every sale.

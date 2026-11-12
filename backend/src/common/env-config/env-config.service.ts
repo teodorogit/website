@@ -34,7 +34,20 @@ export const OPTIONAL_ENV_VARIABLE = {
     CHAT_MAX_INFLIGHT_PER_USER: 'CHAT_MAX_INFLIGHT_PER_USER',
     /** Chat requests the whole process may have in flight at once (default 4). */
     CHAT_MAX_INFLIGHT_GLOBAL: 'CHAT_MAX_INFLIGHT_GLOBAL',
+    /** Key Power BI sends in `X-Api-Key` to read the dashboard metrics. Unset = key access off. */
+    POWERBI_API_KEY: 'POWERBI_API_KEY',
+    /** Clerk user id (`user_…`) whose data that key reads. Required when the key is set. */
+    POWERBI_CLERK_USER_ID: 'POWERBI_CLERK_USER_ID',
 } as const;
+
+/** Shortest `POWERBI_API_KEY` accepted at boot: it is a long-lived secret that never expires. */
+export const MIN_API_KEY_LENGTH = 32;
+
+/** A long-lived, read-only credential that stands for one account. */
+export type ApiKeyAccess = {
+    apiKey: string;
+    clerkUserId: string;
+};
 
 export const ENV_VARIABLE = {
     ...REQUIRED_ENV_VARIABLE,
@@ -99,6 +112,17 @@ export class EnvConfigService {
 
     get chatMaxInflightGlobal(): number {
         return this.positiveInteger(ENV_VARIABLE.CHAT_MAX_INFLIGHT_GLOBAL, 4);
+    }
+
+    /**
+     * The key accepted on routes marked `@AllowApiKey()` and the account it reads; undefined when key
+     * access is off. `config/configuration.ts` refuses to boot with a key that has no account or is too short.
+     */
+    get powerBiAccess(): ApiKeyAccess | undefined {
+        const apiKey = this.get(ENV_VARIABLE.POWERBI_API_KEY);
+        const clerkUserId = this.get(ENV_VARIABLE.POWERBI_CLERK_USER_ID);
+
+        return apiKey !== undefined && clerkUserId !== undefined ? { apiKey, clerkUserId } : undefined;
     }
 
     private positiveInteger(key: EnvVariable, fallback: number): number {

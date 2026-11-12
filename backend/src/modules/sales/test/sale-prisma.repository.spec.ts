@@ -104,18 +104,36 @@ describe('SalePrismaRepository', () => {
 
     describe('lockProductForSnapshot', () => {
         it('reads the product with a parameterized, user-scoped FOR SHARE query', async () => {
-            prisma.$queryRaw.mockResolvedValueOnce([{ id: product_id, name: 'Brigadeiro', price_cents: 300 }]);
+            prisma.$queryRaw.mockResolvedValueOnce([
+                { id: product_id, name: 'Brigadeiro', price_cents: 300, preparation_cost_cents: 100 },
+            ]);
 
             await expect(repository.lockProductForSnapshot(scope, product_id)).resolves.toEqual({
                 id: product_id,
                 name: 'Brigadeiro',
                 price_cents: 300,
+                preparation_cost_cents: 100,
             });
 
             const [strings, ...values] = prisma.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
             const sql = strings.join('?').replace(/\s+/g, ' ');
             expect(sql).toContain('FROM products WHERE id = ?::uuid AND user_id = ?::uuid FOR SHARE');
             expect(values).toEqual([product_id, user_id]);
+        });
+
+        // The row is an unchecked cast to ProductSnapshot: a field missing from the SELECT list would
+        // still compile and reach the sale as undefined (stored as 0, the column default).
+        it('selects the preparation cost next to the name and price, and returns it', async () => {
+            const row = { id: product_id, name: 'Brownie', price_cents: 850, preparation_cost_cents: 250 };
+            prisma.$queryRaw.mockResolvedValueOnce([row]);
+
+            await expect(repository.lockProductForSnapshot(scope, product_id)).resolves.toEqual(row);
+
+            const [strings] = prisma.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+            const sql = strings.join('?').replace(/\s+/g, ' ');
+            expect(sql).toContain(
+                'SELECT id::text AS id, name::text AS name, price_cents, preparation_cost_cents FROM products',
+            );
         });
 
         it('returns null when the product is missing or foreign', async () => {
@@ -135,6 +153,28 @@ describe('SalePrismaRepository', () => {
             expect(prisma.sale.create).toHaveBeenCalledWith({
                 data: { ...new SalePrismaMapper().mapFromEntity(sale), user_id },
             });
+        });
+
+        it('writes every column, the unit cost snapshot included, and maps the stored row back', async () => {
+            const sale = defaultSale({ product_name_snapshot: 'Brownie', unit_price_cents: 850, unit_cost_cents: 250 });
+            // Spelled out instead of built with the mapper, so a column dropped or crossed in either
+            // direction fails here.
+            const stored = {
+                id: sale_id,
+                user_id,
+                product_id,
+                product_name_snapshot: 'Brownie',
+                unit_price_cents: 850,
+                unit_cost_cents: 250,
+                quantity: 2,
+                occurred_at: sale.occurred_at,
+                created_at: sale.created_at,
+                updated_at: sale.updated_at,
+            };
+            prisma.sale.create.mockResolvedValueOnce(stored);
+
+            await expect(repository.insert(scope, sale)).resolves.toEqual(sale);
+            expect(prisma.sale.create).toHaveBeenCalledWith({ data: stored });
         });
     });
 
@@ -182,7 +222,9 @@ describe('SalePrismaRepository', () => {
 
     describe('transaction', () => {
         it('runs lock, insert and update on the $transaction client, not the root client', async () => {
-            tx.$queryRaw.mockResolvedValueOnce([{ id: product_id, name: 'Brigadeiro', price_cents: 300 }]);
+            tx.$queryRaw.mockResolvedValueOnce([
+                { id: product_id, name: 'Brigadeiro', price_cents: 300, preparation_cost_cents: 100 },
+            ]);
             tx.sale.create.mockResolvedValueOnce(rowOf());
             tx.sale.update.mockResolvedValueOnce(rowOf());
 

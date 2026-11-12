@@ -7,6 +7,7 @@ import { DashboardPrismaRepository } from '../repository/dashboard-prisma.reposi
 const prismaMock = {
     $queryRaw: jest.fn(),
     salesGoal: { findUnique: jest.fn() },
+    sale: { findFirst: jest.fn() },
 };
 
 /** The `Prisma.sql` object handed to `$queryRaw`: `text` has `$n` placeholders, `values` the bound parameters. */
@@ -99,6 +100,129 @@ describe('DashboardPrismaRepository', () => {
                 { week_start: '2026-09-14', week_end: '2026-09-20', total_cents: 2500 },
                 { week_start: '2026-10-26', week_end: '2026-11-01', total_cents: 600 },
             ]);
+        });
+    });
+
+    describe('sumDailySales', () => {
+        const range = { start: new Date('2026-01-01T03:00:00.000Z'), end: new Date('2027-01-01T03:00:00.000Z') };
+
+        it('buckets by local day with timezone, user_id and range all bound as parameters', async () => {
+            prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+            await expect(repository.sumDailySales(scope, range, 'America/Sao_Paulo')).resolves.toEqual([]);
+
+            const query = queryAt(0);
+            expect(query.values).toEqual(['America/Sao_Paulo', user_id, range.start, range.end]);
+            expect(query.text).toContain("to_char(s.occurred_at AT TIME ZONE $1, 'YYYY-MM-DD') AS day");
+            expect(query.text).toContain('s.user_id = $2::uuid');
+            expect(query.text).toContain('s.occurred_at >= $3::timestamptz');
+            expect(query.text).toContain('s.occurred_at < $4::timestamptz');
+            expect(query.text).toContain('SUM(s.unit_price_cents::bigint * s.quantity)::bigint AS revenue_cents');
+            expect(query.text).toContain('SUM(s.unit_cost_cents::bigint * s.quantity)::bigint AS cost_cents');
+            expect(query.text).toContain('FILTER (WHERE s.unit_cost_cents = 0)');
+            expect(query.text).not.toContain(user_id);
+            expect(query.text).not.toContain('America/Sao_Paulo');
+        });
+
+        it('maps every bigint aggregate to a number', async () => {
+            prismaMock.$queryRaw.mockResolvedValueOnce([
+                {
+                    day: '2026-11-05',
+                    revenue_cents: 2500n,
+                    cost_cents: 900n,
+                    uncosted_revenue_cents: 300n,
+                    quantity: 7n,
+                    sales_count: 3n,
+                },
+            ]);
+
+            const days = await repository.sumDailySales(scope, range, 'America/Sao_Paulo');
+
+            expect(days.map((day) => ({ ...day }))).toEqual([
+                {
+                    day: '2026-11-05',
+                    revenue_cents: 2500,
+                    cost_cents: 900,
+                    uncosted_revenue_cents: 300,
+                    quantity: 7,
+                    sales_count: 3,
+                },
+            ]);
+            // The response is JSON: a bigint left behind would throw on serialization.
+            expect(() => JSON.stringify(days)).not.toThrow();
+        });
+
+        it('rejects an aggregate beyond the safe integer range instead of rounding it', async () => {
+            prismaMock.$queryRaw.mockResolvedValueOnce([
+                {
+                    day: '2026-11-05',
+                    revenue_cents: 9007199254740993n,
+                    cost_cents: 0n,
+                    uncosted_revenue_cents: 0n,
+                    quantity: 1n,
+                    sales_count: 1n,
+                },
+            ]);
+
+            await expect(repository.sumDailySales(scope, range, 'America/Sao_Paulo')).rejects.toThrow(RangeError);
+        });
+    });
+
+    describe('findTopProducts', () => {
+        const range = { start: new Date('2026-11-01T03:00:00.000Z'), end: new Date('2026-12-01T03:00:00.000Z') };
+
+        it('ranks by units, revenue and name with user_id, range and limit bound as parameters', async () => {
+            prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+            await expect(repository.findTopProducts(scope, range, 5)).resolves.toEqual([]);
+
+            const query = queryAt(0);
+            expect(query.values).toEqual([user_id, range.start, range.end, 5]);
+            expect(query.text).toContain('s.user_id = $1::uuid');
+            expect(query.text).toContain('s.occurred_at >= $2::timestamptz');
+            expect(query.text).toContain('s.occurred_at < $3::timestamptz');
+            expect(query.text).toContain('LIMIT $4');
+            // The catalog join can only ever match a product of the same user.
+            expect(query.text).toContain('LEFT JOIN products p ON p.id = s.product_id AND p.user_id = s.user_id');
+            expect(query.text).toContain('GROUP BY lower(COALESCE(p.name::text, s.product_name_snapshot))');
+            expect(query.text).toContain(
+                'ORDER BY 3 DESC, 4 DESC, lower(COALESCE(p.name::text, s.product_name_snapshot)) ASC',
+            );
+            expect(query.text).not.toContain(user_id);
+        });
+
+        it('maps rows, keeping a null product_id for products that no longer exist', async () => {
+            prismaMock.$queryRaw.mockResolvedValueOnce([
+                { product_id: 'p-1', product_name: 'Brigadeiro', quantity: 40n, revenue_cents: 12000n },
+                { product_id: null, product_name: 'Brownie', quantity: 3n, revenue_cents: 2400n },
+            ]);
+
+            const products = await repository.findTopProducts(scope, range, 5);
+
+            expect(products.map((product) => ({ ...product }))).toEqual([
+                { product_id: 'p-1', product_name: 'Brigadeiro', quantity: 40, revenue_cents: 12000 },
+                { product_id: null, product_name: 'Brownie', quantity: 3, revenue_cents: 2400 },
+            ]);
+        });
+    });
+
+    describe('findFirstSaleAt', () => {
+        it("reads the oldest of the user's own sales", async () => {
+            const occurred_at = new Date('2025-03-14T15:00:00.000Z');
+            prismaMock.sale.findFirst.mockResolvedValueOnce({ occurred_at });
+
+            await expect(repository.findFirstSaleAt(scope)).resolves.toBe(occurred_at);
+            expect(prismaMock.sale.findFirst).toHaveBeenCalledWith({
+                where: { user_id },
+                orderBy: { occurred_at: 'asc' },
+                select: { occurred_at: true },
+            });
+        });
+
+        it('returns null when the user has no sales', async () => {
+            prismaMock.sale.findFirst.mockResolvedValueOnce(null);
+
+            await expect(repository.findFirstSaleAt(scope)).resolves.toBeNull();
         });
     });
 });

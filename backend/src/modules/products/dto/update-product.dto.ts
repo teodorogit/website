@@ -23,7 +23,12 @@ export class UpdateProductDto {
     @IsProductPrice()
     price?: number;
 
-    @ApiPropertyOptional({ example: 2.5, minimum: 0, maximum: MAX_MONEY_REAIS })
+    @ApiPropertyOptional({
+        example: 2.5,
+        minimum: 0,
+        maximum: MAX_MONEY_REAIS,
+        description: 'Não altera o custo nem o lucro de vendas passadas.',
+    })
     @IsOmittable()
     @IsPreparationCost()
     preparationCost?: number;

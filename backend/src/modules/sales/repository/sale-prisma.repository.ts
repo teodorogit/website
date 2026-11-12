@@ -63,11 +63,14 @@ export class SalePrismaRepository implements SaleRepository {
     }
 
     async lockProductForSnapshot(scope: UserScope, productId: string): Promise<ProductSnapshot | null> {
-        // FOR SHARE makes a concurrent DELETE (FK race on insert) or price UPDATE wait until we
+        // FOR SHARE makes a concurrent DELETE (FK race on insert) or price/cost UPDATE wait until we
         // commit, so the snapshot always matches the committed catalog row it references.
         // Casts: Prisma binds strings as text, and raw reads don't deserialize citext.
+        // The row type is an unchecked cast: a ProductSnapshot field left out of the SELECT list still
+        // compiles and reaches the sale as undefined, which Prisma skips without an error (an insert
+        // takes the column default, an update keeps the old value).
         const rows = await this.db.$queryRaw<ProductSnapshot[]>`
-            SELECT id::text AS id, name::text AS name, price_cents
+            SELECT id::text AS id, name::text AS name, price_cents, preparation_cost_cents
             FROM products
             WHERE id = ${productId}::uuid AND user_id = ${scope.user_id}::uuid
             FOR SHARE`;

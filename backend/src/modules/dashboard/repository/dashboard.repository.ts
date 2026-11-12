@@ -1,4 +1,6 @@
 import { UserScope } from '@/common/repository/repository';
+import { DailySalesTotal } from '../entities/daily-sales-total.entity';
+import { ProductSalesTotal } from '../entities/product-sales-total.entity';
 import { WeeklySalesTotal } from '../entities/weekly-sales-total.entity';
 
 export const DASHBOARD_REPOSITORY = 'DashboardRepository';
@@ -20,4 +22,19 @@ export interface DashboardRepository {
         range: { start: Date; end: Date },
         timeZone: string,
     ): Promise<WeeklySalesTotal[]>;
+
+    /**
+     * Revenue, cost, units and sale records per local day (in `timeZone`) of sales with `occurred_at`
+     * in the half-open range `[start, end)`, oldest day first. Days without sales are absent.
+     */
+    sumDailySales(scope: UserScope, range: { start: Date; end: Date }, timeZone: string): Promise<DailySalesTotal[]>;
+
+    /**
+     * The `limit` best sellers among sales with `occurred_at` in `[start, end)`: most units first, then
+     * highest revenue, then name. Products are told apart by resolved name (see `ProductSalesTotal`).
+     */
+    findTopProducts(scope: UserScope, range: { start: Date; end: Date }, limit: number): Promise<ProductSalesTotal[]>;
+
+    /** Instant of the oldest sale the user ever recorded, or null when there is none. */
+    findFirstSaleAt(scope: UserScope): Promise<Date | null>;
 }

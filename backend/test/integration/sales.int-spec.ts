@@ -48,8 +48,10 @@ type SaleBody = {
     productId: string | null;
     productName: string;
     unitPrice: number;
+    unitCost: number;
     quantity: number;
     total: number;
+    profit: number;
     date: string;
     time: string;
 };
@@ -76,11 +78,11 @@ describe('Sales (integration, real PostgreSQL)', () => {
 
     const server = () => ctx.app.getHttpServer();
 
-    async function createProduct(user: string, name: string, price: number): Promise<ProductBody> {
+    async function createProduct(user: string, name: string, price: number, preparationCost = 0): Promise<ProductBody> {
         const response = await request(server())
             .post('/api/products')
             .set(authAs(user))
-            .send({ name, price, preparationCost: 0 })
+            .send({ name, price, preparationCost })
             .expect(HttpStatus.CREATED);
 
         return response.body as ProductBody;
@@ -145,8 +147,10 @@ describe('Sales (integration, real PostgreSQL)', () => {
                 productId: product.id,
                 productName: 'Brigadeiro',
                 unitPrice: 3.5,
+                unitCost: 0,
                 quantity: 3,
                 total: 10.5,
+                profit: 10.5,
                 date: '2026-10-20',
                 time: '12:30',
             });
@@ -411,6 +415,186 @@ describe('Sales (integration, real PostgreSQL)', () => {
 
             const page = await listOk(ALICE);
             expect(page.items[0]).toMatchObject({ unitPrice: price, quantity, total });
+        });
+    });
+
+    /**
+     * The preparation cost is snapshotted like the name and the price: read from the locked catalog row
+     * when the sale is created or its product is swapped, and never again. The costs asserted here are
+     * not zero: a cost that never left the catalog row would be stored as the column default, 0, and a
+     * product without a cost could not tell the two apart.
+     */
+    describe('unit cost snapshot and profit', () => {
+        async function sell(productId: string, quantity: number, date = '2026-10-24'): Promise<SaleBody> {
+            const response = await request(server())
+                .post('/api/sales')
+                .set(authAs(ALICE))
+                .send({ productId, quantity, date })
+                .expect(HttpStatus.CREATED);
+
+            return response.body as SaleBody;
+        }
+
+        async function patchProduct(id: string, body: Record<string, unknown>): Promise<void> {
+            await request(server()).patch(`/api/products/${id}`).set(authAs(ALICE)).send(body).expect(HttpStatus.OK);
+        }
+
+        async function patchSale(id: string, body: Record<string, unknown>): Promise<SaleBody> {
+            const response = await request(server())
+                .patch(`/api/sales/${id}`)
+                .set(authAs(ALICE))
+                .send(body)
+                .expect(HttpStatus.OK);
+
+            return response.body as SaleBody;
+        }
+
+        const rowOf = (id: string) => ctx.prisma.sale.findUniqueOrThrow({ where: { id } });
+
+        it('POST stores the product’s preparation cost on the sale and returns unitCost and profit', async () => {
+            // In floats: 19.99 × 7 = 139.92999999999998 and (19.99 − 7.35) × 7 = 88.47999999999999.
+            const product = await createProduct(ALICE, 'Brownie', 19.99, 7.35);
+            pinNow('2026-10-24T15:30:00.000Z');
+
+            const response = await request(server())
+                .post('/api/sales')
+                .set(authAs(ALICE))
+                .send({ productId: product.id, quantity: 7, date: '2026-10-24' })
+                .expect(HttpStatus.CREATED);
+
+            expect(response.body).toEqual({
+                id: expect.any(String),
+                productId: product.id,
+                productName: 'Brownie',
+                unitPrice: 19.99,
+                unitCost: 7.35,
+                quantity: 7,
+                total: 139.93,
+                profit: 88.48,
+                date: '2026-10-24',
+                time: '12:30',
+            });
+
+            const sale = response.body as SaleBody;
+            expect(await rowOf(sale.id)).toMatchObject({
+                product_id: product.id,
+                unit_price_cents: 1999,
+                unit_cost_cents: 735,
+                quantity: 7,
+            });
+            // The listing reads the same stored snapshot back.
+            expect((await listOk(ALICE)).items).toEqual([sale]);
+        });
+
+        it('a product sold below its preparation cost yields a negative profit', async () => {
+            const product = await createProduct(ALICE, 'Trufa', 3, 4.5);
+
+            const sale = await sell(product.id, 3);
+
+            expect(sale).toMatchObject({ unitPrice: 3, unitCost: 4.5, total: 9, profit: -4.5 });
+            expect(await rowOf(sale.id)).toMatchObject({ unit_price_cents: 300, unit_cost_cents: 450 });
+        });
+
+        it('PATCH /api/products/:id changing preparationCost leaves the sale’s unitCost and profit untouched', async () => {
+            const product = await createProduct(ALICE, 'Brigadeiro', 3, 1);
+            const sale = await sell(product.id, 2);
+            expect(sale).toMatchObject({ unitPrice: 3, unitCost: 1, total: 6, profit: 4 });
+
+            await patchProduct(product.id, { preparationCost: 2.5 });
+
+            expect((await listOk(ALICE)).items).toEqual([sale]);
+            expect(await rowOf(sale.id)).toMatchObject({ unit_price_cents: 300, unit_cost_cents: 100, quantity: 2 });
+
+            // A sale recorded after the edit takes the new cost; the old one still does not move.
+            const newer = await sell(product.id, 2, '2026-10-25');
+            expect(newer).toMatchObject({ unitPrice: 3, unitCost: 2.5, total: 6, profit: 1 });
+            expect((await listOk(ALICE)).items).toEqual([newer, sale]);
+        });
+
+        it('PATCH /api/sales/:id swapping to another product re-snapshots the cost with the name and price', async () => {
+            const brigadeiro = await createProduct(ALICE, 'Brigadeiro', 3, 1);
+            const brownie = await createProduct(ALICE, 'Brownie', 8.75, 2.5);
+            const beijinho = await createProduct(ALICE, 'Beijinho', 2);
+            const sale = await sell(brigadeiro.id, 2);
+            expect(sale).toMatchObject({ unitCost: 1, profit: 4 });
+
+            const swapped = await patchSale(sale.id, { productId: brownie.id });
+            expect(swapped).toEqual({
+                ...sale,
+                productId: brownie.id,
+                productName: 'Brownie',
+                unitPrice: 8.75,
+                unitCost: 2.5,
+                total: 17.5,
+                profit: 12.5,
+            });
+            expect(await rowOf(sale.id)).toMatchObject({
+                product_id: brownie.id,
+                product_name_snapshot: 'Brownie',
+                unit_price_cents: 875,
+                unit_cost_cents: 250,
+                quantity: 2,
+            });
+
+            // A product without a cost overwrites the previous one with zero instead of leaving it behind.
+            const withoutCost = await patchSale(sale.id, { productId: beijinho.id });
+            expect(withoutCost).toEqual({
+                ...sale,
+                productId: beijinho.id,
+                productName: 'Beijinho',
+                unitPrice: 2,
+                unitCost: 0,
+                total: 4,
+                profit: 4,
+            });
+            expect(await rowOf(sale.id)).toMatchObject({ unit_price_cents: 200, unit_cost_cents: 0 });
+        });
+
+        it('a quantity-only PATCH keeps the cost and recomputes the profit, as do a re-sent productId and a new date', async () => {
+            const product = await createProduct(ALICE, 'Brigadeiro', 3, 1);
+            const sale = await sell(product.id, 2);
+            // The catalog now disagrees with the sale, so a re-snapshot on any of these edits would show.
+            await patchProduct(product.id, { preparationCost: 2.5 });
+
+            const moreUnits = await patchSale(sale.id, { quantity: 5 });
+            expect(moreUnits).toEqual({ ...sale, quantity: 5, total: 15, profit: 10 });
+
+            const sameProduct = await patchSale(sale.id, { productId: product.id.toUpperCase(), quantity: 4 });
+            expect(sameProduct).toEqual({ ...sale, quantity: 4, total: 12, profit: 8 });
+
+            const moved = await patchSale(sale.id, { date: '2026-10-20' });
+            expect(moved).toEqual({ ...sale, quantity: 4, total: 12, profit: 8, date: '2026-10-20' });
+
+            expect(await rowOf(sale.id)).toMatchObject({
+                product_id: product.id,
+                unit_price_cents: 300,
+                unit_cost_cents: 100,
+                quantity: 4,
+            });
+        });
+
+        it('DELETE of the product keeps the cost on the sale, which stays editable', async () => {
+            const product = await createProduct(ALICE, 'Brownie', 8, 2.5);
+            const sale = await sell(product.id, 3);
+            expect(sale).toMatchObject({ unitPrice: 8, unitCost: 2.5, total: 24, profit: 16.5 });
+
+            await request(server())
+                .delete(`/api/products/${product.id}`)
+                .set(authAs(ALICE))
+                .expect(HttpStatus.NO_CONTENT);
+
+            const orphan = { ...sale, productId: null };
+            expect((await listOk(ALICE)).items).toEqual([orphan]);
+            expect(await rowOf(sale.id)).toMatchObject({
+                product_id: null,
+                product_name_snapshot: 'Brownie',
+                unit_price_cents: 800,
+                unit_cost_cents: 250,
+            });
+
+            const edited = await patchSale(sale.id, { quantity: 1 });
+            expect(edited).toEqual({ ...orphan, quantity: 1, total: 8, profit: 5.5 });
+            expect(await rowOf(sale.id)).toMatchObject({ product_id: null, unit_cost_cents: 250, quantity: 1 });
         });
     });
 
@@ -749,6 +933,7 @@ describe('Sales (integration, real PostgreSQL)', () => {
                 productName: 'Brownie',
                 unitPrice: 8.75,
                 total: 17.5,
+                profit: 17.5,
             });
 
             const row = await ctx.prisma.sale.findUniqueOrThrow({ where: { id: sale.id } });
@@ -778,7 +963,7 @@ describe('Sales (integration, real PostgreSQL)', () => {
             for (const productId of [product.id, product.id.toUpperCase()]) {
                 const response = await patch(ALICE, sale.id, { productId, quantity: 5 });
                 expect(response.status).toBe(HttpStatus.OK);
-                expect(response.body).toEqual({ ...sale, quantity: 5, total: 15 });
+                expect(response.body).toEqual({ ...sale, quantity: 5, total: 15, profit: 15 });
             }
 
             const row = await ctx.prisma.sale.findUniqueOrThrow({ where: { id: sale.id } });
@@ -810,7 +995,7 @@ describe('Sales (integration, real PostgreSQL)', () => {
 
             const edited = await patch(ALICE, sale.id, { quantity: 4, date: '2026-10-23' });
             expect(edited.status).toBe(HttpStatus.OK);
-            expect(edited.body).toEqual({ ...orphan, quantity: 4, total: 12, date: '2026-10-23' });
+            expect(edited.body).toEqual({ ...orphan, quantity: 4, total: 12, profit: 12, date: '2026-10-23' });
             expect(await ctx.prisma.sale.findUniqueOrThrow({ where: { id: sale.id } })).toMatchObject({
                 product_id: null,
                 product_name_snapshot: 'Brigadeiro',
@@ -830,6 +1015,7 @@ describe('Sales (integration, real PostgreSQL)', () => {
                 unitPrice: 2.5,
                 quantity: 4,
                 total: 10,
+                profit: 10,
                 date: '2026-10-23',
             });
         });

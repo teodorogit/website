@@ -56,7 +56,8 @@ export class ProductsService {
     }
 
     /**
-     * Past sales are not touched: they keep their own name/price snapshot (BACKEND_SCOPE.md §2).
+     * Past sales are not touched: they keep their own name/price/cost snapshot, so a new price or
+     * preparation cost never reprices or re-costs them (BACKEND_SCOPE.md §2).
      * An empty body is a no-op that returns the product as is (and does not bump `updated_at`).
      */
     async update(user: AuthUser, id: string, dto: UpdateProductDto): Promise<Product> {

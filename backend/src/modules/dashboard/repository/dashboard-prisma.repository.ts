@@ -3,8 +3,15 @@ import { Prisma } from '@prisma/client';
 import { UserScope } from '@/common/repository/repository';
 import { aggregateToCents } from '@/common/utils/money.util';
 import { PrismaService } from '@/infrastructure/prisma/prisma.service';
+import { DailySalesTotal } from '../entities/daily-sales-total.entity';
+import { ProductSalesTotal } from '../entities/product-sales-total.entity';
 import { WeeklySalesTotal } from '../entities/weekly-sales-total.entity';
-import { DashboardPrismaMapper, WeeklySalesRow } from '../mapper/dashboard-prisma.mapper';
+import {
+    DailySalesRow,
+    DashboardPrismaMapper,
+    ProductSalesRow,
+    WeeklySalesRow,
+} from '../mapper/dashboard-prisma.mapper';
 import { DashboardRepository } from './dashboard.repository';
 
 /*
@@ -59,5 +66,74 @@ export class DashboardPrismaRepository implements DashboardRepository {
         `);
 
         return rows.map((row) => this.dashboardMapper.mapToEntity(row));
+    }
+
+    async sumDailySales(
+        scope: UserScope,
+        range: { start: Date; end: Date },
+        timeZone: string,
+    ): Promise<DailySalesTotal[]> {
+        // The FILTERed sum is NULL on a day whose sales all carry a cost, hence the COALESCE.
+        const rows = await this.prismaService.$queryRaw<DailySalesRow[]>(Prisma.sql`
+            SELECT
+                to_char(s.occurred_at AT TIME ZONE ${timeZone}, 'YYYY-MM-DD') AS day,
+                SUM(s.unit_price_cents::bigint * s.quantity)::bigint AS revenue_cents,
+                SUM(s.unit_cost_cents::bigint * s.quantity)::bigint AS cost_cents,
+                COALESCE(
+                    SUM(s.unit_price_cents::bigint * s.quantity) FILTER (WHERE s.unit_cost_cents = 0),
+                    0
+                )::bigint AS uncosted_revenue_cents,
+                SUM(s.quantity)::bigint AS quantity,
+                COUNT(*)::bigint AS sales_count
+            FROM sales s
+            WHERE s.user_id = ${scope.user_id}::uuid
+              AND s.occurred_at >= ${range.start}::timestamptz
+              AND s.occurred_at < ${range.end}::timestamptz
+            GROUP BY 1
+            ORDER BY 1
+        `);
+
+        return rows.map((row) => this.dashboardMapper.mapDailySalesToEntity(row));
+    }
+
+    async findTopProducts(
+        scope: UserScope,
+        range: { start: Date; end: Date },
+        limit: number,
+    ): Promise<ProductSalesTotal[]> {
+        // A product is its resolved name: the current catalog name while the sale still points to a
+        // product (so a rename keeps one row), else the snapshot. `lower()` folds case the way the
+        // citext unique index does, so at most one catalog product can be behind a group and MAX()
+        // just picks it. The join repeats user_id so a product of another user can never match.
+        const rows = await this.prismaService.$queryRaw<ProductSalesRow[]>(Prisma.sql`
+            SELECT
+                MAX(p.id::text) AS product_id,
+                COALESCE(
+                    MAX(p.name::text),
+                    (array_agg(s.product_name_snapshot ORDER BY s.occurred_at DESC, s.id DESC))[1]
+                ) AS product_name,
+                SUM(s.quantity)::bigint AS quantity,
+                SUM(s.unit_price_cents::bigint * s.quantity)::bigint AS revenue_cents
+            FROM sales s
+            LEFT JOIN products p ON p.id = s.product_id AND p.user_id = s.user_id
+            WHERE s.user_id = ${scope.user_id}::uuid
+              AND s.occurred_at >= ${range.start}::timestamptz
+              AND s.occurred_at < ${range.end}::timestamptz
+            GROUP BY lower(COALESCE(p.name::text, s.product_name_snapshot))
+            ORDER BY 3 DESC, 4 DESC, lower(COALESCE(p.name::text, s.product_name_snapshot)) ASC
+            LIMIT ${limit}
+        `);
+
+        return rows.map((row) => this.dashboardMapper.mapProductSalesToEntity(row));
+    }
+
+    async findFirstSaleAt(scope: UserScope): Promise<Date | null> {
+        const sale = await this.prismaService.sale.findFirst({
+            where: { user_id: scope.user_id },
+            orderBy: { occurred_at: 'asc' },
+            select: { occurred_at: true },
+        });
+
+        return sale?.occurred_at ?? null;
     }
 }

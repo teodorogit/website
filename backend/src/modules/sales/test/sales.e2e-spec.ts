@@ -13,8 +13,10 @@ const saleBody = {
     productId: product_id,
     productName: 'Brigadeiro',
     unitPrice: 3,
+    unitCost: 1,
     quantity: 2,
     total: 6,
+    profit: 4,
     date: '2026-10-24',
     time: '12:30',
 };
@@ -105,7 +107,58 @@ describe('Sales (e2e)', () => {
                 unitPrice: 0.1,
                 quantity: 3,
                 total: 0.3,
+                // (0.10 − 1.00) × 3: the fixture's unit cost is above this unit price.
+                profit: -2.7,
             });
+        });
+
+        it.each([
+            // In floats: 7.35 × 7 = 51.449999999999996.
+            [
+                { unit_price_cents: 735, unit_cost_cents: 0, quantity: 7 },
+                { unitPrice: 7.35, unitCost: 0, total: 51.45, profit: 51.45 },
+            ],
+            // In floats: 19.99 × 7 = 139.92999999999998 and (19.99 − 7.35) × 7 = 88.47999999999999.
+            [
+                { unit_price_cents: 1999, unit_cost_cents: 735, quantity: 7 },
+                { unitPrice: 19.99, unitCost: 7.35, total: 139.93, profit: 88.48 },
+            ],
+            // Sold below cost: the profit is negative, never clamped to zero.
+            [
+                { unit_price_cents: 735, unit_cost_cents: 1999, quantity: 7 },
+                { unitPrice: 7.35, unitCost: 19.99, total: 51.45, profit: -88.48 },
+            ],
+            [
+                { unit_price_cents: 300, unit_cost_cents: 300, quantity: 2 },
+                { unitPrice: 3, unitCost: 3, total: 6, profit: 0 },
+            ],
+        ])('renders unitCost and profit computed in cents for %o', async (snapshot, money) => {
+            authenticateAs();
+            mockedSalesService.list.mockResolvedValueOnce({ items: [defaultSale(snapshot)], nextCursor: null });
+
+            const response = await request(server()).get('/api/sales').set(AUTH_HEADER).expect(HttpStatus.OK);
+
+            expect(response.body.items).toEqual([{ ...saleBody, ...money, quantity: snapshot.quantity }]);
+        });
+
+        it('serializes the sale fields in the contract order', async () => {
+            authenticateAs();
+            mockedSalesService.list.mockResolvedValueOnce({ items: [defaultSale()], nextCursor: null });
+
+            const response = await request(server()).get('/api/sales').set(AUTH_HEADER).expect(HttpStatus.OK);
+
+            expect(Object.keys(response.body.items[0])).toEqual([
+                'id',
+                'productId',
+                'productName',
+                'unitPrice',
+                'unitCost',
+                'quantity',
+                'total',
+                'profit',
+                'date',
+                'time',
+            ]);
         });
 
         it.each([
@@ -230,8 +283,8 @@ describe('Sales (e2e)', () => {
             expect(mockedSalesService.create).not.toHaveBeenCalled();
         });
 
-        it.each(['price', 'unitPrice', 'productName', 'userId'])(
-            'rejects a client-sent %s (price and name come from the catalog)',
+        it.each(['price', 'unitPrice', 'unitCost', 'profit', 'productName', 'userId'])(
+            'rejects a client-sent %s (name, price and cost come from the catalog; the profit is derived)',
             async (field) => {
                 authenticateAs();
 
@@ -271,7 +324,7 @@ describe('Sales (e2e)', () => {
                 .send({ quantity: 3 })
                 .expect(HttpStatus.OK);
 
-            expect(response.body).toEqual({ ...saleBody, quantity: 3, total: 9 });
+            expect(response.body).toEqual({ ...saleBody, quantity: 3, total: 9, profit: 6 });
             expect(mockedSalesService.update).toHaveBeenCalledWith(authUser, sale_id, { quantity: 3 });
         });
 
@@ -312,6 +365,8 @@ describe('Sales (e2e)', () => {
             [{ date: null }, 'date', 'Deve ser uma data válida no formato AAAA-MM-DD.'],
             [{ date: '2026-13-01' }, 'date', 'Deve ser uma data válida no formato AAAA-MM-DD.'],
             [{ price: 1 }, 'price', 'Campo não permitido.'],
+            [{ unitCost: 0.01 }, 'unitCost', 'Campo não permitido.'],
+            [{ profit: 100 }, 'profit', 'Campo não permitido.'],
             [{ productName: 'Outro' }, 'productName', 'Campo não permitido.'],
             [{ userId: 'someone-else' }, 'userId', 'Campo não permitido.'],
         ])('400 VALIDATION_ERROR for %o', async (body, field, message) => {

@@ -80,8 +80,10 @@ function saleBodyOf(row: Sale): Record<string, unknown> {
         productId: row.product_id,
         productName: row.product_name_snapshot,
         unitPrice: row.unit_price_cents / 100,
+        unitCost: row.unit_cost_cents / 100,
         quantity: row.quantity,
         total: (row.unit_price_cents * row.quantity) / 100,
+        profit: ((row.unit_price_cents - row.unit_cost_cents) * row.quantity) / 100,
         date: spDate(row.occurred_at),
         time: spTime(row.occurred_at),
     };
@@ -634,7 +636,7 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
             });
         });
 
-        describe('bodies that try to set identity, price or name are rejected with 400', () => {
+        describe('bodies that try to set identity, price, cost, profit or name are rejected with 400', () => {
             type Case = {
                 name: string;
                 method: 'post' | 'patch' | 'put';
@@ -682,6 +684,20 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                     field: 'unitPrice',
                 },
                 {
+                    name: 'POST /api/sales + unitCost',
+                    method: 'post',
+                    path: () => '/api/sales',
+                    body: (w) => ({ ...newSale(w), unitCost: 0.01 }),
+                    field: 'unitCost',
+                },
+                {
+                    name: 'POST /api/sales + profit',
+                    method: 'post',
+                    path: () => '/api/sales',
+                    body: (w) => ({ ...newSale(w), profit: 999 }),
+                    field: 'profit',
+                },
+                {
                     name: 'PATCH /api/sales/:id + userId',
                     method: 'patch',
                     path: (w) => `/api/sales/${w.bob.saleId}`,
@@ -708,6 +724,20 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                     path: (w) => `/api/sales/${w.bob.saleId}`,
                     body: () => ({ productName: 'Outro' }),
                     field: 'productName',
+                },
+                {
+                    name: 'PATCH /api/sales/:id + unitCost',
+                    method: 'patch',
+                    path: (w) => `/api/sales/${w.bob.saleId}`,
+                    body: () => ({ unitCost: 0.01 }),
+                    field: 'unitCost',
+                },
+                {
+                    name: 'PATCH /api/sales/:id + profit',
+                    method: 'patch',
+                    path: (w) => `/api/sales/${w.bob.saleId}`,
+                    body: () => ({ quantity: 2, profit: 999 }),
+                    field: 'profit',
                 },
                 {
                     name: "PATCH another user's sale + userId (400 before ownership)",
@@ -924,7 +954,7 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
             return ctx.prisma.sale.findMany({ where: { user_id: seed.userId } });
         }
 
-        it('products are created and listed by name; a sale is registered at the catalog price with a name/price snapshot', async () => {
+        it('products are created and listed by name; a sale is registered at the catalog price with a name/price/cost snapshot', async () => {
             const [brigadeiro, beijinho, brownie] = seed.productBodies;
             const productShape = (name: string, price: number, preparationCost: number) => ({
                 id: expect.stringMatching(UUID),
@@ -953,8 +983,10 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 productId: seed.products.brigadeiro,
                 productName: 'Brigadeiro',
                 unitPrice: 3,
+                unitCost: 1,
                 quantity: 2,
                 total: 6,
+                profit: 4,
                 date: seed.today,
                 time: expect.any(String),
             });
@@ -964,8 +996,10 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 productId: seed.products.brownie,
                 productName: 'Brownie',
                 unitPrice: 8,
+                unitCost: 2.5,
                 quantity: 1,
                 total: 8,
+                profit: 5.5,
                 date: seed.today,
                 time: expect.any(String),
             });
@@ -975,8 +1009,10 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 productId: seed.products.beijinho,
                 productName: 'Beijinho',
                 unitPrice: 3.5,
+                unitCost: 1.2,
                 quantity: 4,
                 total: 14,
+                profit: 9.2,
                 date: seed.currentMonday,
                 time: expect.any(String),
             });
@@ -990,11 +1026,13 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 product_id: seed.products.brigadeiro,
                 product_name_snapshot: 'Brigadeiro',
                 unit_price_cents: 300,
+                unit_cost_cents: 100,
                 quantity: 2,
             });
             expect(byId.get(seed.sales.brownieToday)).toMatchObject({
                 product_name_snapshot: 'Brownie',
                 unit_price_cents: 800,
+                unit_cost_cents: 250,
                 quantity: 1,
             });
             // A sale "today" is stamped with the current instant.
@@ -1040,6 +1078,9 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
             // Home derives the week's revenue from these records: 6 + 8 + 14 + 1.
             const weekTotal = week.body.items.reduce((sum: number, s: { total: number }) => sum + s.total, 0);
             expect(weekTotal).toBeCloseTo(29, 10);
+            // And the week's profit from each sale's own cost snapshot: 4 + 5.5 + 9.2 + 1 (the seeded Trufa has no cost).
+            const weekProfit = week.body.items.reduce((sum: number, s: { profit: number }) => sum + s.profit, 0);
+            expect(weekProfit).toBeCloseTo(19.7, 10);
         });
 
         it('sales goal is set and the dashboard shows goal, sold, remaining, 8 weeks (zero weeks included) and the best week', async () => {
@@ -1096,13 +1137,18 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
         });
 
         it('editing and deleting a product keeps sale history intelligible; sales can be filtered, edited and deleted', async () => {
-            // Edit the product: past sales keep their name and price.
+            // Edit the product: past sales keep their name, price and cost.
             const edited = await api()
                 .patch(`/api/products/${seed.products.brigadeiro}`)
                 .set(authAs(ALICE))
-                .send({ name: 'Brigadeiro Gourmet', price: 4.5 })
+                .send({ name: 'Brigadeiro Gourmet', price: 4.5, preparationCost: 2 })
                 .expect(HttpStatus.OK);
-            expect(edited.body).toMatchObject({ id: seed.products.brigadeiro, name: 'Brigadeiro Gourmet', price: 4.5 });
+            expect(edited.body).toMatchObject({
+                id: seed.products.brigadeiro,
+                name: 'Brigadeiro Gourmet',
+                price: 4.5,
+                preparationCost: 2,
+            });
 
             // Delete another product: its sales stay, unlinked, with their snapshot.
             await api()
@@ -1122,21 +1168,26 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 productId: seed.products.brigadeiro,
                 productName: 'Brigadeiro',
                 unitPrice: 3,
+                unitCost: 1,
                 quantity: 2,
                 total: 6,
+                profit: 4,
             });
             expect(byId.get(seed.sales.brownieToday)).toMatchObject({
                 productId: null,
                 productName: 'Brownie',
                 unitPrice: 8,
+                unitCost: 2.5,
                 quantity: 1,
                 total: 8,
+                profit: 5.5,
             });
             const brownieRow = await ctx.prisma.sale.findUniqueOrThrow({ where: { id: seed.sales.brownieToday } });
             expect(brownieRow).toMatchObject({
                 product_id: null,
                 product_name_snapshot: 'Brownie',
                 unit_price_cents: 800,
+                unit_cost_cents: 250,
             });
 
             // The dashboard is recomputed from the stored snapshots: unchanged by the product edit/delete.
@@ -1156,9 +1207,9 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 .set(authAs(ALICE))
                 .send({ quantity: 3 })
                 .expect(HttpStatus.OK);
-            expect(relabelled.body).toEqual({ ...brownieSale, quantity: 3, total: 24 });
+            expect(relabelled.body).toEqual({ ...brownieSale, quantity: 3, total: 24, profit: 16.5 });
 
-            // Re-sending the same productId does not reprice history at the new catalog price.
+            // Re-sending the same productId does not reprice or re-cost history at the new catalog values.
             const brigadeiroSale = byId.get(seed.sales.brigadeiroToday)!;
             const same = await api()
                 .patch(`/api/sales/${seed.sales.brigadeiroToday}`)
@@ -1167,7 +1218,7 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 .expect(HttpStatus.OK);
             expect(same.body).toEqual(brigadeiroSale);
 
-            // Swapping the product re-snapshots name and price; moving the date keeps the local time.
+            // Swapping the product re-snapshots name, price and cost; moving the date keeps the local time.
             const yesterday = plusDays(seed.today, -1);
             const swapped = await api()
                 .patch(`/api/sales/${seed.sales.brigadeiroToday}`)
@@ -1179,8 +1230,10 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 productId: seed.products.beijinho,
                 productName: 'Beijinho',
                 unitPrice: 3.5,
+                unitCost: 1.2,
                 quantity: 2,
                 total: 7,
+                profit: 4.6,
                 date: yesterday,
                 time: brigadeiroSale['time'],
             });
@@ -1189,6 +1242,7 @@ describe('Cross-user isolation and BACKEND_SCOPE.md §6 acceptance (real Postgre
                 product_id: seed.products.beijinho,
                 product_name_snapshot: 'Beijinho',
                 unit_price_cents: 350,
+                unit_cost_cents: 120,
             });
 
             // Sales page range filter (inclusive bounds) finds it on its new day only.

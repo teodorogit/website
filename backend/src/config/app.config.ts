@@ -1,6 +1,7 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { API_KEY_SECURITY_NAME } from '@/common/decorators/allow-api-key.decorator';
 import { EnvConfigService, NODE_ENV } from '@/common/env-config/env-config.service';
 import { AllExceptionsFilter } from '@/common/filters/all-exceptions.filter';
 import { JsonDepthInterceptor } from '@/common/interceptors/json-depth.interceptor';
@@ -58,6 +59,7 @@ export function appConfig(app: NestExpressApplication): void {
                 .setDescription('Contrato: BACKEND_SCOPE.md. Rotas de dados exigem o token de sessão do Clerk.')
                 .setVersion('0.1.0')
                 .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' })
+                .addApiKey({ type: 'apiKey', in: 'header', name: 'X-Api-Key' }, API_KEY_SECURITY_NAME)
                 .build(),
         );
 

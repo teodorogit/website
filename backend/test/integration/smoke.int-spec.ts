@@ -17,7 +17,7 @@ describe('Integration smoke (real PostgreSQL)', () => {
         await resetDatabase(ctx.prisma);
     });
 
-    it('applies the migration with extensions and CHECK constraints', async () => {
+    it('applies the migrations with extensions and CHECK constraints', async () => {
         const extensions = await ctx.prisma.$queryRaw<{ extname: string }[]>`SELECT extname FROM pg_extension`;
         expect(extensions.map((e) => e.extname)).toEqual(expect.arrayContaining(['citext', 'pgcrypto']));
 
@@ -27,6 +27,7 @@ describe('Integration smoke (real PostgreSQL)', () => {
             expect.arrayContaining([
                 'products_price_cents_check',
                 'sales_quantity_check',
+                'sales_unit_cost_cents_check',
                 'sales_goals_amount_cents_check',
             ]),
         );

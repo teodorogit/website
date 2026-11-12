@@ -87,6 +87,7 @@ export class SalesService {
                     product_id: product.id,
                     product_name_snapshot: product.name,
                     unit_price_cents: product.price_cents,
+                    unit_cost_cents: product.preparation_cost_cents,
                     quantity: dto.quantity,
                     occurred_at,
                 }),
@@ -105,16 +106,17 @@ export class SalesService {
 
             const changes: SaleChanges = {};
 
-            // Re-snapshot only on an actual product swap: re-sending the same productId must not
-            // silently reprice history, and a sale whose product was deleted keeps its snapshot.
-            // Product columns are left out otherwise, so a concurrent product delete (which sets
-            // product_id to NULL) is never overwritten with a dangling id. UUIDs compare
-            // case-insensitively: @IsUUID accepts uppercase while Postgres returns lowercase.
+            // Re-snapshot (link, name, price and cost) only on an actual product swap: re-sending the
+            // same productId must not silently reprice or re-cost history, and a sale whose product was
+            // deleted keeps its snapshot. Product columns are left out otherwise, so a concurrent
+            // product delete (which sets product_id to NULL) is never overwritten with a dangling id.
+            // UUIDs compare case-insensitively: @IsUUID accepts uppercase while Postgres returns lowercase.
             if (dto.productId !== undefined && dto.productId.toLowerCase() !== sale.product_id?.toLowerCase()) {
                 const product = await lockOwnedProduct(repository, scope, dto.productId);
                 changes.product_id = product.id;
                 changes.product_name_snapshot = product.name;
                 changes.unit_price_cents = product.price_cents;
+                changes.unit_cost_cents = product.preparation_cost_cents;
             }
 
             if (dto.quantity !== undefined) {

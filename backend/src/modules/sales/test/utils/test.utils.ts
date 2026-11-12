@@ -48,6 +48,7 @@ export const defaultSale = (overrides: Partial<Sale> = {}): Sale =>
         product_id,
         product_name_snapshot: 'Brigadeiro',
         unit_price_cents: 300,
+        unit_cost_cents: 100,
         quantity: 2,
         occurred_at: default_occurred_at,
         created_at: new Date('2026-10-24T15:30:00.000Z'),
@@ -59,5 +60,6 @@ export const defaultProductSnapshot = (overrides: Partial<ProductSnapshot> = {})
     id: product_id,
     name: 'Brigadeiro',
     price_cents: 300,
+    preparation_cost_cents: 100,
     ...overrides,
 });

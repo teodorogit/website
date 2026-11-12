@@ -51,6 +51,7 @@ model Sale {
     product_id            String?  @db.Uuid
     product_name_snapshot String   @db.VarChar(32)
     unit_price_cents      Int
+    unit_cost_cents       Int      @default(0)
     quantity              Int
     occurred_at           DateTime @db.Timestamptz(6)
     created_at            DateTime @default(now()) @db.Timestamptz(6)

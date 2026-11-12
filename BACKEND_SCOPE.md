@@ -6,7 +6,7 @@ Documento de implementação para o backend real do sistema. O frontend atual us
 
 - Prefixo: `/api`; versão inicial sem versionamento explícito.
 - Formato: JSON UTF-8. Valores monetários são enviados em reais como números decimais na API e armazenados como centavos inteiros no banco.
-- Datas de calendário: `YYYY-MM-DD`. Datas e horas persistidas: `timestamptz`; interpretar datas e agrupar semanas no fuso horário do usuário, inicialmente `America/Sao_Paulo`.
+- Datas de calendário: `YYYY-MM-DD`. Datas e horas persistidas: `timestamptz`; interpretar datas e agrupar por dia, dia da semana, semana, mês e ano no fuso horário do usuário, inicialmente `America/Sao_Paulo`.
 - Identificadores: UUID. O usuário dono dos dados é sempre determinado pela identidade autenticada, nunca por um `userId` confiado no corpo da requisição.
 - Proteger rotas de dados com um JWT de sessão do Clerk validado no backend. O frontend ainda precisa incluir o token nas chamadas à API. O webhook de sincronização de usuários é opcional: o backend pode criar a linha local do usuário na primeira chamada autenticada.
 - Resposta de erro uniforme:
@@ -56,7 +56,7 @@ Resposta `200`:
 
 #### `GET /api/sales?date=YYYY-MM-DD`
 
-Lista as vendas da data local selecionada pela Home. Deve incluir `productName` e `unitPrice` salvos na venda para manter o histórico, mesmo que o produto mude ou seja removido.
+Lista as vendas da data local selecionada pela Home. Deve incluir `productName`, `unitPrice` e `unitCost` salvos na venda para manter o histórico, mesmo que o produto mude ou seja removido.
 
 Resposta `200`:
 
@@ -68,8 +68,10 @@ Resposta `200`:
       "productId": "uuid",
       "productName": "Brigadeiro",
       "unitPrice": 3.0,
+      "unitCost": 1.0,
       "quantity": 2,
       "total": 6.0,
+      "profit": 4.0,
       "date": "2026-10-24",
       "time": "12:30"
     }
@@ -77,13 +79,16 @@ Resposta `200`:
 }
 ```
 
+- `unitCost` é o custo de preparo unitário do produto no momento da venda. `0` também significa "custo não informado": é o padrão do cadastro de produto. Vendas registradas antes de essa coluna existir receberam o custo que o produto tinha quando a migração rodou (ou `0`, se o produto já tinha sido excluído).
+- `total = unitPrice × quantity` e `profit = (unitPrice − unitCost) × quantity`, calculados no servidor em centavos. `profit` pode ser negativo.
+
 #### `GET /api/sales?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`
 
 Mesma rota para o histórico da página Vendas. Datas são inclusivas; aceitar somente um limite também. Validar que `startDate <= endDate`; ordenar por data e hora decrescentes. Sem filtros, retornar todas as vendas paginadas (ver seção de paginação).
 
 #### `POST /api/sales`
 
-Registra uma venda usando o preço atual do produto no backend, sem confiar em preço ou nome enviados pelo navegador.
+Registra uma venda usando o preço e o custo de preparo atuais do produto no backend, sem confiar em preço, custo ou nome enviados pelo navegador.
 
 Corpo:
 
@@ -91,7 +96,7 @@ Corpo:
 { "productId": "uuid", "quantity": 2, "date": "2026-10-24" }
 ```
 
-Validar produto pertencente ao usuário, `quantity` inteiro positivo e data válida. Criar a venda e capturar nome e preço unitário do produto na mesma transação.
+Validar produto pertencente ao usuário, `quantity` inteiro positivo e data válida. Criar a venda e capturar nome, preço unitário e custo de preparo unitário do produto na mesma transação.
 
 Resposta `201`: objeto de venda no mesmo formato de `GET /api/sales`.
 
@@ -111,7 +116,7 @@ Cria ou substitui a meta do usuário (uma meta por usuário).
 
 Corpo: `{ "amount": 1000.0 }`. Validar valor numérico finito maior que zero. Resposta `200` com a representação da meta.
 
-Na Home, o total diário/semanal, custo de preparação e lucro podem ser derivados dos registros de venda e produtos retornados, como no protótipo. Alternativamente, retorná-los em um resumo, desde que use o mesmo fuso e os mesmos valores históricos.
+Na Home, o total diário/semanal, o custo de preparação e o lucro são derivados dos registros de venda retornados: somar `total` e `profit` de cada venda (custo = total − lucro). Não usar o `preparationCost` atual do catálogo, como fazia o protótipo: ele muda com o tempo e faria a Home discordar do Dashboard, que usa o custo gravado em cada venda.
 
 ### Dashboard (`/dashboard`)
 
@@ -141,13 +146,128 @@ Resposta `200`:
 
 `sold` deve preservar o comportamento atual do gráfico de meta: soma de todas as vendas do usuário. `remaining = max(0, salesGoal - sold)`; quando não há meta, `salesGoal` e `remaining` podem ser `null` e zero, respectivamente, desde que o frontend trate o caso. `bestWeek` deve ser `null` quando não houver vendas no período. A API agrega `total = quantidade × preço unitário histórico`.
 
+#### `GET /api/dashboard/metrics?year=2026&month=11`
+
+Métricas de vendas de um ano: produto que mais vendeu, média de vendas, dia da semana que mais vende, semana do mês que mais vende e lucro mensal × anual.
+
+Parâmetros (ambos opcionais; qualquer outro parâmetro é `400`):
+
+| Parâmetro | Tipo | Padrão | Regra |
+|---|---|---|---|
+| `year` | inteiro, `2000` a `9998` | o ano atual no fuso do usuário | Ano das métricas. |
+| `month` | inteiro, `1` a `12` | ausente | Restringe o período àquele mês do ano. `month` sem `year` é aquele mês do ano atual. |
+
+Há dois escopos na mesma resposta:
+
+- **O período** é o ano inteiro ou, com `month`, aquele mês. Vale para `totals`, `averageSales`, `topProducts`, `bestSellingProduct`, `salesByWeekday`, `bestWeekday`, `salesByWeekOfMonth` e `bestWeekOfMonth`.
+- **O ano inteiro**, com ou sem `month`, vale para `monthlyProfit` e `annualProfit`. O "lucro mensal × anual" é `monthlyProfit[m − 1]` contra `annualProfit`.
+
+Resposta `200` (os arrays abaixo mostram só o primeiro item):
+
+```json
+{
+  "currency": "BRL",
+  "year": 2026,
+  "month": null,
+  "period": { "startDate": "2026-01-01", "endDate": "2026-12-31" },
+  "firstSaleDate": "2025-03-14",
+  "totals": {
+    "revenue": 318.97,
+    "cost": 80.5,
+    "profit": 238.47,
+    "revenueWithoutCost": 12.0,
+    "quantity": 62,
+    "salesCount": 40,
+    "sellingDays": 18
+  },
+  "averageSales": { "perSellingDay": 17.72, "perSale": 7.97 },
+  "bestSellingProduct": { "productId": "uuid", "productName": "Brigadeiro", "quantity": 40, "revenue": 120.0 },
+  "topProducts": [{ "productId": "uuid", "productName": "Brigadeiro", "quantity": 40, "revenue": 120.0 }],
+  "salesByWeekday": [
+    { "isoWeekday": 1, "revenue": 30.0, "quantity": 8, "salesCount": 5, "occurrences": 45, "averageRevenue": 0.67 }
+  ],
+  "bestWeekday": {
+    "isoWeekday": 6,
+    "revenue": 90.0,
+    "quantity": 20,
+    "salesCount": 12,
+    "occurrences": 45,
+    "averageRevenue": 2.0
+  },
+  "salesByWeekOfMonth": [
+    {
+      "weekOfMonth": 1,
+      "startDay": 1,
+      "endDay": 7,
+      "revenue": 120.0,
+      "quantity": 25,
+      "salesCount": 15,
+      "months": 10,
+      "averageRevenue": 12.0
+    }
+  ],
+  "bestWeekOfMonth": {
+    "weekOfMonth": 1,
+    "startDay": 1,
+    "endDay": 7,
+    "revenue": 120.0,
+    "quantity": 25,
+    "salesCount": 15,
+    "months": 10,
+    "averageRevenue": 12.0
+  },
+  "monthlyProfit": [{ "month": 1, "revenue": 0, "cost": 0, "profit": 0, "revenueWithoutCost": 0 }],
+  "annualProfit": { "revenue": 318.97, "cost": 80.5, "profit": 238.47, "revenueWithoutCost": 12.0 }
+}
+```
+
+Campos. Valores em dinheiro são reais com até duas casas; contagens são inteiros.
+
+| Campo | Significado |
+|---|---|
+| `year`, `month` | O ano usado (o pedido ou o atual) e o mês pedido; `month` é `null` no ano inteiro. |
+| `period.startDate`, `period.endDate` | Primeiro e último dia do período, ambos inclusivos, como nos filtros de `GET /api/sales`. |
+| `firstSaleDate` | Data da venda mais antiga do usuário, em qualquer ano; `null` sem vendas. Serve para montar um seletor de ano. |
+| `revenue` | Faturamento: Σ quantidade × preço unitário histórico. É a mesma soma que `/api/dashboard` chama de `sold` e `total`. |
+| `cost` | Σ quantidade × custo unitário gravado na venda (`unitCost`). |
+| `profit` | `revenue − cost`. Pode ser negativo. |
+| `revenueWithoutCost` | Parte do `revenue` vinda de vendas com `unitCost` 0. Acima de zero, o lucro está superestimado: a tela pode avisar que há faturamento sem custo cadastrado. |
+| `totals.quantity` | Unidades vendidas no período. |
+| `totals.salesCount` | Registros de venda no período. Um registro é uma linha de produto, não um pedido: a API não tem pedido nem cliente. |
+| `totals.sellingDays` | Dias do período com pelo menos uma venda. |
+| `averageSales.perSellingDay` | `revenue ÷ sellingDays`: média por dia **com venda**, não por dia do calendário. `null` sem vendas. |
+| `averageSales.perSale` | `revenue ÷ salesCount`: valor médio de um registro de venda. Não é ticket médio por cliente. `null` sem vendas. |
+| `topProducts` | Até 5 produtos do período, por unidades (desc), depois faturamento (desc), depois nome. Vazio sem vendas. |
+| `bestSellingProduct` | O primeiro de `topProducts`; `null` sem vendas. |
+| `salesByWeekday` | Sempre 7 itens em ordem, `isoWeekday` 1 = segunda … 7 = domingo (ISO 8601; **não** é o `getDay()` do JavaScript, em que domingo é 0). |
+| `salesByWeekday[].occurrences` | Quantas vezes aquele dia da semana caiu entre o primeiro e o último dia com venda do período, contando os dias sem venda. 0 em todos quando o período não tem vendas. |
+| `salesByWeekday[].averageRevenue` | `revenue ÷ occurrences`; `null` quando `occurrences` é 0. |
+| `bestWeekday` | O item com a maior média (`revenue ÷ occurrences`); empate vai para o dia mais cedo na semana; `null` sem faturamento. |
+| `salesByWeekOfMonth` | Sempre 5 itens em ordem. "Semana do mês" é um bloco fixo de dias do mês, sem relação com as semanas de segunda a domingo de `weeklySales`: 1 = dias 1–7, 2 = 8–14, 3 = 15–21, 4 = 22–28, 5 = 29–31. `startDay` e `endDay` trazem esses limites (sempre 29 e 31 no bloco 5, mesmo em mês mais curto). |
+| `salesByWeekOfMonth[].months` | Em quantos meses do período aquele bloco teve pelo menos uma venda. |
+| `salesByWeekOfMonth[].averageRevenue` | `revenue ÷ months`; `null` quando `months` é 0. |
+| `bestWeekOfMonth` | O item com a maior média (`revenue ÷ months`); empate vai para o bloco mais cedo; `null` sem faturamento. |
+| `monthlyProfit` | Sempre 12 itens, `month` 1 = janeiro … 12 = dezembro (o mês `m` está no índice `m − 1`), com zeros nos meses sem venda. |
+| `annualProfit` | Soma dos 12 meses. Na visão do ano inteiro, é igual a `totals`. |
+
+Regras:
+
+- Todo agrupamento (dia, dia da semana, bloco do mês, mês, ano) usa o fuso horário do usuário.
+- Os dois "melhores" (`bestWeekday`, `bestWeekOfMonth`) são eleitos pela média, não pelo total, e a comparação é exata (não usa a média arredondada). Pelo total o calendário decidiria: num ano em andamento o bloco 1 já aconteceu uma vez a mais que os seguintes, e num mês alguns dias da semana caem cinco vezes e outros quatro. O total de cada item continua em `revenue`.
+- Produto, no ranking, é o nome resolvido, sem diferenciar maiúsculas de minúsculas (conforme o `lower()` do banco): o nome **atual** no catálogo enquanto a venda ainda aponta para um produto, senão o nome gravado na venda. Consequências: um produto renomeado é uma linha só, com o nome atual; um produto excluído e recriado com o mesmo nome é uma linha só, com o `productId` novo; um produto excluído aparece uma vez por nome sob o qual foi vendido, com `productId` `null` (excluir um produto que tinha sido renomeado divide a linha dele).
+- `topProducts[].productName` é o nome atual do catálogo (ou, com `productId` `null`, o nome da venda mais recente) e pode ser diferente do `productName` das vendas, que é o nome da época. Ligar uma linha do ranking a um produto pelo `productId`, nunca pelo nome.
+- O corte em 5 é por unidades: um produto de poucas unidades e muito faturamento pode ficar de fora da lista, mas continua contado em `totals`.
+- Vendas com data futura contam no dia em que estão datadas; nada é limitado a "hoje".
+- Vendas datadas antes do ano 2000 aparecem em `GET /api/sales` e no `sold` de `/api/dashboard`, mas em nenhuma consulta de métricas.
+- `400` com `VALIDATION_ERROR` e `details` para `year` ou `month` inválidos.
+
 ### Vendas (`/sales`)
 
 Além dos `GET` e `POST /api/sales` descritos na Home:
 
 #### `PATCH /api/sales/:id`
 
-Atualiza produto, quantidade e/ou data de uma venda. Corpo parcial com campos permitidos: `{ "productId": "uuid", "quantity": 3, "date": "2026-10-23" }`. Se trocar o produto, atualizar juntos o vínculo, nome e preço histórico a partir do catálogo atual. Para venda histórica cujo produto foi apagado, permitir manter o snapshot sem vínculo. Resposta `200` com a venda atualizada.
+Atualiza produto, quantidade e/ou data de uma venda. Corpo parcial com campos permitidos: `{ "productId": "uuid", "quantity": 3, "date": "2026-10-23" }`. Se trocar o produto, atualizar juntos o vínculo, nome, preço e custo históricos a partir do catálogo atual. Alterar só a quantidade ou a data mantém o preço e o custo gravados. Para venda histórica cujo produto foi apagado, permitir manter o snapshot sem vínculo. Resposta `200` com a venda atualizada.
 
 #### `DELETE /api/sales/:id`
 
@@ -165,11 +285,11 @@ Validar nome não vazio (máximo 32 caracteres, conforme formulário), preço ma
 
 #### `PATCH /api/products/:id`
 
-Atualiza `name`, `price` e/ou `preparationCost` com as mesmas validações. Alterar preço não altera o preço histórico de vendas passadas. Resposta `200` com o produto atualizado.
+Atualiza `name`, `price` e/ou `preparationCost` com as mesmas validações. Alterar preço não altera o preço histórico de vendas passadas, e alterar `preparationCost` não altera o custo nem o lucro de vendas já registradas: uma venda feita enquanto o produto estava com custo 0 continua com custo 0 depois que o custo é informado. Resposta `200` com o produto atualizado.
 
 #### `DELETE /api/products/:id`
 
-Remove o produto do catálogo do usuário. As vendas existentes devem continuar consultáveis com seus dados de snapshot; definir `sales.product_id` como `NULL` em vez de apagar vendas. Resposta `204`.
+Remove o produto do catálogo do usuário. As vendas existentes devem continuar consultáveis com seus dados de snapshot; definir `sales.product_id` como `NULL` em vez de apagar vendas. As vendas mantêm nome, preço e custo gravados; nas métricas do Dashboard elas passam a aparecer sob o nome gravado, com `productId` `null`. Resposta `204`.
 
 ### Assistente de conversação (drawer presente nas páginas autenticadas)
 
@@ -251,6 +371,7 @@ CREATE TABLE sales (
   product_id uuid REFERENCES products(id) ON DELETE SET NULL,
   product_name_snapshot varchar(32) NOT NULL,
   unit_price_cents integer NOT NULL CHECK (unit_price_cents >= 0),
+  unit_cost_cents integer NOT NULL DEFAULT 0 CHECK (unit_cost_cents >= 0),
   quantity integer NOT NULL CHECK (quantity > 0),
   occurred_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -272,7 +393,9 @@ CREATE TABLE sales_goals (
 );
 ```
 
-Ao criar ou editar uma venda, validar que `product_id` pertence ao mesmo `user_id`. Uma FK simples garante que o produto existe, mas a propriedade deve ser conferida na camada de serviço ou reforçada pelo desenho do banco. Na exclusão de produto, manter `product_name_snapshot` e `unit_price_cents`; não apagar registros de venda.
+Ao criar ou editar uma venda, validar que `product_id` pertence ao mesmo `user_id`. Uma FK simples garante que o produto existe, mas a propriedade deve ser conferida na camada de serviço ou reforçada pelo desenho do banco. Na exclusão de produto, manter `product_name_snapshot`, `unit_price_cents` e `unit_cost_cents`; não apagar registros de venda.
+
+`unit_cost_cents` é o custo de preparo unitário copiado do produto no momento da venda, do mesmo jeito que o preço, para que o lucro de um mês passado não mude quando o custo do produto é editado. `0` também significa custo não informado. A coluna foi adicionada numa segunda migração, que preencheu as vendas existentes com o custo atual do produto (e deixou `0` nas vendas de produtos já excluídos).
 
 Não é necessário persistir conversas para o escopo atual: o frontend envia o histórico recente a cada chamada. Se for necessário histórico durável, acrescentar tabelas `chat_conversations` e `chat_messages` ligadas a `users`, com política de retenção e isolamento por usuário definidos.
 
@@ -328,8 +451,9 @@ Invoke-RestMethod http://localhost:3001/api/health
 ## 6. Critérios de aceite
 
 - Cada página carrega e altera somente dados do usuário autenticado; uma alteração aparece nas demais páginas após recarregar.
-- Home mostra vendas do dia/semana, lista produtos e registra uma venda com preço correto e snapshot histórico.
+- Home mostra vendas do dia/semana, lista produtos e registra uma venda com preço e custo corretos e snapshot histórico.
 - Vendas permite filtrar por intervalo, editar e excluir; vendas antigas continuam inteligíveis depois que um produto é editado ou apagado.
 - Dashboard apresenta meta, vendido, restante, série das últimas oito semanas (incluindo semanas zeradas) e semana de maior faturamento correta.
+- Dashboard apresenta, por ano ou por mês, o produto que mais vendeu, a média de vendas, o dia da semana e a semana do mês que mais vendem e o lucro mensal × anual, calculados com o preço e o custo gravados em cada venda; editar ou excluir um produto não muda o lucro de vendas passadas.
 - Chat usa catálogo e vendas persistidos, responde com `reply` no contrato definido e o botão Stop interrompe a geração no frontend e a chamada em andamento ao Ollama.
 - O backend valida JWT, entrada, propriedade dos recursos e erros; `GET /api/health` não revela configuração sensível.

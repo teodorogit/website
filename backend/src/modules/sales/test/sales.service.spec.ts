@@ -183,7 +183,7 @@ describe('SalesService', () => {
             // 2026-11-04 23:30 in São Paulo, already 2026-11-05 11:30 on the Tokyo test runner.
             jest.useFakeTimers({ now: new Date('2026-11-05T02:30:00.000Z'), doNotFake: ['nextTick', 'setImmediate'] });
             mockedTransactionalSaleRepository.lockProductForSnapshot.mockResolvedValueOnce(
-                defaultProductSnapshot({ name: 'Brownie', price_cents: 850 }),
+                defaultProductSnapshot({ name: 'Brownie', price_cents: 850, preparation_cost_cents: 250 }),
             );
             mockedTransactionalSaleRepository.insert.mockImplementationOnce(async (_scope, sale) => sale);
 
@@ -198,10 +198,27 @@ describe('SalesService', () => {
                 product_id,
                 product_name_snapshot: 'Brownie',
                 unit_price_cents: 850,
+                unit_cost_cents: 250,
                 quantity: 3,
                 occurred_at: new Date('2026-11-06T02:30:00.000Z'),
             });
         });
+
+        it.each([250, 0])(
+            'snapshots the preparation cost the locked product has at that moment (%p cents)',
+            async (preparation_cost_cents) => {
+                mockedTransactionalSaleRepository.lockProductForSnapshot.mockResolvedValueOnce(
+                    defaultProductSnapshot({ preparation_cost_cents }),
+                );
+                mockedTransactionalSaleRepository.insert.mockImplementationOnce(async (_scope, sale) => sale);
+
+                const created = await service.create(user, { productId: product_id, quantity: 2, date: '2026-10-24' });
+
+                // toBe, so a cost that never left the catalog row (undefined) cannot pass as the column default 0.
+                expect(created.unit_cost_cents).toBe(preparation_cost_cents);
+                expect(created.unit_price_cents).toBe(300);
+            },
+        );
 
         it('returns the persisted sale', async () => {
             const persisted = defaultSale();
@@ -269,10 +286,15 @@ describe('SalesService', () => {
             expect(mockedTransactionalSaleRepository.update).toHaveBeenCalledWith(scope, sale_id, { quantity: 4 });
         });
 
-        it('swapping the product updates link, name and unit price together from the catalog', async () => {
+        it('swapping the product updates link, name, unit price and unit cost together from the catalog', async () => {
             mockedTransactionalSaleRepository.findById.mockResolvedValueOnce(defaultSale());
             mockedTransactionalSaleRepository.lockProductForSnapshot.mockResolvedValueOnce(
-                defaultProductSnapshot({ id: other_product_id, name: 'Brownie', price_cents: 850 }),
+                defaultProductSnapshot({
+                    id: other_product_id,
+                    name: 'Brownie',
+                    price_cents: 850,
+                    preparation_cost_cents: 250,
+                }),
             );
 
             await service.update(user, sale_id, { productId: other_product_id });
@@ -285,6 +307,30 @@ describe('SalesService', () => {
                 product_id: other_product_id,
                 product_name_snapshot: 'Brownie',
                 unit_price_cents: 850,
+                unit_cost_cents: 250,
+            });
+        });
+
+        it('a swap to a product without a cost stores 0, not the cost of the product it replaces', async () => {
+            mockedTransactionalSaleRepository.findById.mockResolvedValueOnce(defaultSale({ unit_cost_cents: 100 }));
+            mockedTransactionalSaleRepository.lockProductForSnapshot.mockResolvedValueOnce(
+                defaultProductSnapshot({
+                    id: other_product_id,
+                    name: 'Brownie',
+                    price_cents: 850,
+                    preparation_cost_cents: 0,
+                }),
+            );
+
+            await service.update(user, sale_id, { productId: other_product_id, quantity: 4 });
+
+            // toStrictEqual: an undefined unit_cost_cents would leave the old cost in the row.
+            expect(mockedTransactionalSaleRepository.update.mock.calls[0]?.[2]).toStrictEqual({
+                product_id: other_product_id,
+                product_name_snapshot: 'Brownie',
+                unit_price_cents: 850,
+                unit_cost_cents: 0,
+                quantity: 4,
             });
         });
 
@@ -298,7 +344,29 @@ describe('SalesService', () => {
                 product_id,
                 product_name_snapshot: 'Brigadeiro',
                 unit_price_cents: 300,
+                unit_cost_cents: 100,
             });
+        });
+
+        // Editing a product's preparation cost never re-costs sales already recorded: without a swap the
+        // catalog is not even read, and no snapshot column reaches the write.
+        it.each([
+            ['re-sending the current productId', { productId: product_id }, {}],
+            [
+                're-sending the current productId with a quantity',
+                { productId: product_id, quantity: 4 },
+                { quantity: 4 },
+            ],
+            ['a quantity-only edit', { quantity: 5 }, { quantity: 5 }],
+            ['a date-only edit', { date: '2026-10-20' }, { occurred_at: new Date('2026-10-20T15:30:00.000Z') }],
+        ])('%s keeps the stored unit cost: no unit_cost_cents in the changes', async (_, dto, expectedChanges) => {
+            mockedTransactionalSaleRepository.findById.mockResolvedValueOnce(defaultSale());
+
+            await service.update(user, sale_id, dto);
+
+            expect(mockedTransactionalSaleRepository.lockProductForSnapshot).not.toHaveBeenCalled();
+            // toStrictEqual: exactly these keys, not even a snapshot column set to undefined.
+            expect(mockedTransactionalSaleRepository.update.mock.calls[0]?.[2]).toStrictEqual(expectedChanges);
         });
 
         it('keeps the snapshot of a sale whose product was deleted when productId is absent', async () => {

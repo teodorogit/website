@@ -8,6 +8,7 @@ export type ProductSnapshot = {
     id: string;
     name: string;
     price_cents: number;
+    preparation_cost_cents: number;
 };
 
 /** Keyset position in the `(occurred_at DESC, id DESC)` listing order. */
@@ -26,7 +27,10 @@ export type SaleListQuery = {
 
 /** Columns an edit may change. Only the keys present are written. */
 export type SaleChanges = Partial<
-    Pick<Sale, 'product_id' | 'product_name_snapshot' | 'unit_price_cents' | 'quantity' | 'occurred_at'>
+    Pick<
+        Sale,
+        'product_id' | 'product_name_snapshot' | 'unit_price_cents' | 'unit_cost_cents' | 'quantity' | 'occurred_at'
+    >
 >;
 
 export interface SaleRepository {
@@ -43,8 +47,8 @@ export interface SaleRepository {
 
     /**
      * Reads the user's product and holds a share lock on it until the surrounding transaction
-     * ends, so it can't be deleted or repriced before the snapshot commits. Only meaningful
-     * inside `transaction`.
+     * ends, so it can't be deleted, repriced or re-costed before the snapshot commits. Only
+     * meaningful inside `transaction`.
      */
     lockProductForSnapshot(scope: UserScope, productId: string): Promise<ProductSnapshot | null>;
 

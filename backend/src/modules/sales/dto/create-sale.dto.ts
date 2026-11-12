@@ -4,7 +4,7 @@ import { MAX_SALE_QUANTITY } from '@/common/utils/money.util';
 import { IsCalendarDate } from '@/common/validators/is-calendar-date.validator';
 
 /**
- * Name and price are deliberately absent: they are snapshotted from the user's catalog
+ * Name, price and cost are deliberately absent: they are snapshotted from the user's catalog
  * (BACKEND_SCOPE.md §2 "POST /api/sales"), and the global pipe rejects them as unknown fields.
  *
  * class-validator reports constraints bottom-up and the error factory keeps the first one,

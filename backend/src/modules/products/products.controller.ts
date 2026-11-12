@@ -52,7 +52,7 @@ export class ProductsController {
 
     @Delete(':id')
     @HttpCode(HttpStatus.NO_CONTENT)
-    @ApiNoContentResponse({ description: 'Produto removido; as vendas mantêm o snapshot de nome e preço.' })
+    @ApiNoContentResponse({ description: 'Produto removido; as vendas mantêm o snapshot de nome, preço e custo.' })
     @ApiValidationErrorResponse()
     @ApiNotFoundErrorResponse(ERROR_CODE.PRODUCT_NOT_FOUND)
     async remove(@CurrentUser() user: AuthUser, @Param('id', new UuidParamPipe('id')) id: string): Promise<void> {

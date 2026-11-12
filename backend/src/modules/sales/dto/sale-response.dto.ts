@@ -17,11 +17,20 @@ export class SaleResponse {
     @ApiProperty({ example: 3.0, description: 'Preço unitário no momento da venda, em reais.' })
     unitPrice!: number;
 
+    @ApiProperty({
+        example: 1.0,
+        description: 'Custo de preparo unitário no momento da venda, em reais. 0 também indica custo não informado.',
+    })
+    unitCost!: number;
+
     @ApiProperty({ example: 2 })
     quantity!: number;
 
     @ApiProperty({ example: 6.0, description: 'unitPrice × quantity, em reais.' })
     total!: number;
+
+    @ApiProperty({ example: 4.0, description: '(unitPrice − unitCost) × quantity, em reais. Pode ser negativo.' })
+    profit!: number;
 
     @ApiProperty({ format: 'date', example: '2026-10-24', description: 'Data local do usuário.' })
     date!: string;
@@ -35,9 +44,11 @@ export class SaleResponse {
             productId: sale.product_id,
             productName: sale.product_name_snapshot,
             unitPrice: centsToReais(sale.unit_price_cents),
+            unitCost: centsToReais(sale.unit_cost_cents),
             quantity: sale.quantity,
-            // Multiplied in cents so the total carries no float error.
+            // Subtracted and multiplied in cents so the total and the profit carry no float error.
             total: centsToReais(sale.unit_price_cents * sale.quantity),
+            profit: centsToReais((sale.unit_price_cents - sale.unit_cost_cents) * sale.quantity),
             date: toLocalDate(sale.occurred_at, timeZone),
             time: toLocalTime(sale.occurred_at, timeZone),
         };
