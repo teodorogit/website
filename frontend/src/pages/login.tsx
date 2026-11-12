@@ -6,7 +6,7 @@ const LoginPage = () => {
     <main className="login-page">
       <section className="login-brand-panel" aria-label="Matheus">
         <img className="login-brand-image" src={loginImage} alt="Ilustração de login" />
-        <p className="login-copyright">All rights reserved @Matheus</p>
+        <p className="login-copyright">Todos os direitos reservados · Matheus</p>
       </section>
       <section className="login-form-panel" aria-label="Entrar na conta">
         <LoginInputs />

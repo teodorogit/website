@@ -1,50 +1,26 @@
+import type { ApiClient } from './api-client'
+
 export type Product = {
   id: string
   name: string
   price: number
   preparationCost: number
-}
-
-const storageKey = 'matheus.product-catalog.v1'
-const initialProducts: Product[] = [
-  { id: 'brigadeiro-demo', name: 'Brigadeiro', price: 3, preparationCost: 0 },
-]
-
-const readProducts = (): Product[] => {
-  if (typeof window === 'undefined') return initialProducts
-
-  try {
-    const storedProducts = window.localStorage.getItem(storageKey)
-    if (!storedProducts) return initialProducts
-
-    const parsedProducts: unknown = JSON.parse(storedProducts)
-    if (!Array.isArray(parsedProducts)) return initialProducts
-
-    return (parsedProducts as Product[]).map((product) => ({
-      ...product,
-      preparationCost: Number.isFinite(product.preparationCost) ? product.preparationCost : 0,
-    }))
-  } catch {
-    return initialProducts
-  }
-}
-
-const writeProducts = (products: Product[]) => {
-  window.localStorage.setItem(storageKey, JSON.stringify(products))
-  return products
+  createdAt: string
+  updatedAt: string
 }
 
 export const productRepository = {
-  list: readProducts,
-  create(product: Omit<Product, 'id'>) {
-    return writeProducts([...readProducts(), { ...product, id: crypto.randomUUID() }])
+  async list(api: ApiClient): Promise<Product[]> {
+    const response = await api.get<{ items: Product[] }>('/products')
+    return response.items
   },
-  update(id: string, updates: Omit<Product, 'id'>) {
-    return writeProducts(readProducts().map((product) => (
-      product.id === id ? { ...product, ...updates } : product
-    )))
+  create(api: ApiClient, product: Pick<Product, 'name' | 'price' | 'preparationCost'>): Promise<Product> {
+    return api.post('/products', product)
   },
-  remove(id: string) {
-    return writeProducts(readProducts().filter((product) => product.id !== id))
+  update(api: ApiClient, id: string, updates: Pick<Product, 'name' | 'price' | 'preparationCost'>): Promise<Product> {
+    return api.patch(`/products/${encodeURIComponent(id)}`, updates)
+  },
+  remove(api: ApiClient, id: string): Promise<void> {
+    return api.delete(`/products/${encodeURIComponent(id)}`)
   },
 }

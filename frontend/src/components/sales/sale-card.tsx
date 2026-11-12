@@ -1,6 +1,11 @@
 import { Card } from '@heroui/react'
 import type { Sale } from '../../data/sales'
 
+const currencyFormatter = new Intl.NumberFormat('pt-BR', {
+  style: 'currency',
+  currency: 'BRL',
+})
+
 type SaleCardProps = {
   sale: Sale
 }
@@ -15,7 +20,7 @@ const SaleCard = ({ sale }: SaleCardProps) => (
         <Card.Title>{sale.productName} · {sale.quantity} un.</Card.Title>
         <span className="sale-time">Venda às {sale.time}</span>
       </div>
-      <strong className="sale-price">${(sale.price * sale.quantity).toFixed(2)}</strong>
+      <strong className="sale-price">{currencyFormatter.format(sale.price * sale.quantity)}</strong>
     </Card.Content>
   </Card>
 )

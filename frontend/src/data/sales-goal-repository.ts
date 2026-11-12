@@ -1,20 +1,15 @@
-const storageKey = 'matheus.sales-goal.v1'
+import type { ApiClient } from './api-client'
 
-const readSalesGoal = (): number | null => {
-  if (typeof window === 'undefined') return null
-
-  try {
-    const storedGoal = Number(window.localStorage.getItem(storageKey))
-    return Number.isFinite(storedGoal) && storedGoal > 0 ? storedGoal : null
-  } catch {
-    return null
-  }
+export type SalesGoal = {
+  amount: number | null
+  updatedAt: string | null
 }
 
 export const salesGoalRepository = {
-  get: readSalesGoal,
-  save(goal: number) {
-    window.localStorage.setItem(storageKey, String(goal))
-    return goal
+  get(api: ApiClient): Promise<SalesGoal> {
+    return api.get('/sales-goal')
+  },
+  save(api: ApiClient, amount: number): Promise<SalesGoal> {
+    return api.put('/sales-goal', { amount })
   },
 }

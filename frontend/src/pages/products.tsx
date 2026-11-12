@@ -1,8 +1,9 @@
 import { Card } from '@heroui/react'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import HeaderComponent from '../components/common/header/login-button'
 import FooterNavigation from '../components/common/footer'
 import { productRepository, type Product } from '../data/product-repository'
+import { errorMessage, useApi } from '../data/api-client'
 
 const productNameLimit = 32
 const priceInputLimit = 9
@@ -17,11 +18,31 @@ const normalizeAmountInput = (value: string) => {
 }
 
 const ProductsPage = () => {
-  const [products, setProducts] = useState<Product[]>(() => productRepository.list())
+  const api = useApi()
+  const [products, setProducts] = useState<Product[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [price, setPrice] = useState('')
   const [preparationCost, setPreparationCost] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!api.isReady) return
+    let active = true
+    productRepository.list(api)
+      .then((loadedProducts) => {
+        if (active) setProducts(loadedProducts)
+      })
+      .catch((loadError: unknown) => {
+        if (active) setError(errorMessage(loadError))
+      })
+      .finally(() => {
+        if (active) setIsLoading(false)
+      })
+    return () => { active = false }
+  }, [api])
 
   const resetForm = () => {
     setName('')
@@ -30,7 +51,7 @@ const ProductsPage = () => {
     setEditingId(null)
   }
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const parsedPrice = Number(price)
     const parsedPreparationCost = Number(preparationCost)
@@ -42,11 +63,24 @@ const ProductsPage = () => {
       price: parsedPrice,
       preparationCost: parsedPreparationCost,
     }
-    const updatedProducts = editingId
-      ? productRepository.update(editingId, product)
-      : productRepository.create(product)
-    setProducts(updatedProducts)
-    resetForm()
+    setIsSaving(true)
+    setError('')
+    try {
+      const savedProduct = editingId
+        ? await productRepository.update(api, editingId, product)
+        : await productRepository.create(api, product)
+      setProducts((currentProducts) => {
+        const updatedProducts = editingId
+          ? currentProducts.map((currentProduct) => currentProduct.id === savedProduct.id ? savedProduct : currentProduct)
+          : [...currentProducts, savedProduct]
+        return updatedProducts.sort((first, second) => first.name.localeCompare(second.name))
+      })
+      resetForm()
+    } catch (saveError) {
+      setError(errorMessage(saveError))
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const startEditing = (product: Product) => {
@@ -56,9 +90,16 @@ const ProductsPage = () => {
     setPreparationCost(product.preparationCost.toFixed(2))
   }
 
-  const handleDelete = (id: string) => {
-    setProducts(productRepository.remove(id))
-    if (editingId === id) resetForm()
+  const handleDelete = async (product: Product) => {
+    if (!window.confirm(`Excluir o produto ${product.name}?`)) return
+    setError('')
+    try {
+      await productRepository.remove(api, product.id)
+      setProducts((currentProducts) => currentProducts.filter((currentProduct) => currentProduct.id !== product.id))
+      if (editingId === product.id) resetForm()
+    } catch (deleteError) {
+      setError(errorMessage(deleteError))
+    }
   }
 
   const handlePriceChange = (value: string) => {
@@ -77,6 +118,7 @@ const ProductsPage = () => {
           <p className="eyebrow">CATÁLOGO</p>
           <h2>Produtos</h2>
         </div>
+        {error && <p className="api-error" role="alert">{error}</p>}
         <div className="products-layout">
           <form className="product-form" onSubmit={handleSubmit}>
             <h3>{editingId ? 'Editar produto' : 'Cadastrar produto'}</h3>
@@ -124,8 +166,8 @@ const ProductsPage = () => {
                   Cancelar
                 </button>
               )}
-              <button className="button-primary" type="submit">
-                {editingId ? 'Salvar alterações' : 'Salvar produto'}
+              <button className="button-primary" disabled={isSaving} type="submit">
+                {isSaving ? 'Salvando...' : editingId ? 'Salvar alterações' : 'Salvar produto'}
               </button>
             </div>
           </form>
@@ -135,7 +177,9 @@ const ProductsPage = () => {
               <h3 id="product-list-heading">Produtos cadastrados</h3>
               <span>{products.length}</span>
             </div>
-            {products.length ? (
+            {isLoading ? (
+              <p>Carregando produtos...</p>
+            ) : products.length ? (
               <div className="product-list">
                 {products.map((product) => (
                   <Card className="product-card" key={product.id}>
@@ -146,7 +190,7 @@ const ProductsPage = () => {
                       </div>
                       <div className="product-actions">
                         <button onClick={() => startEditing(product)} type="button">Editar</button>
-                        <button onClick={() => handleDelete(product.id)} type="button">Excluir</button>
+                        <button onClick={() => void handleDelete(product)} type="button">Excluir</button>
                       </div>
                     </Card.Content>
                   </Card>

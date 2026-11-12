@@ -1,6 +1,6 @@
 import { UserButton } from '@clerk/react'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import menuIcon from '../../../assets/list.svg'
+import { errorMessage, useApi } from '../../../data/api-client'
 
 type HeaderComponentProp = {
   title: string
@@ -11,13 +11,6 @@ type ChatMessage = {
   content: string
 }
 
-const welcomeMessage: ChatMessage = {
-  role: 'assistant',
-  content: 'Oi, Matheus! Como posso ajudar você hoje?',
-}
-
-const chatApiUrl = import.meta.env.VITE_CHAT_API_URL ?? 'http://localhost:3001'
-
 const suggestedPrompts = [
   'Como estão as vendas hoje?',
   'Quais produtos vendem mais?',
@@ -25,8 +18,9 @@ const suggestedPrompts = [
 ]
 
 const HeaderComponent = ({ title }: HeaderComponentProp) => {
+  const api = useApi()
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
-  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [chatError, setChatError] = useState('')
@@ -48,47 +42,21 @@ const HeaderComponent = ({ title }: HeaderComponentProp) => {
     activeRequest.current = controller
 
     try {
-      const response = await fetch(`${chatApiUrl}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: conversation.slice(-20) }),
-        signal: controller.signal,
-      })
-      const result: unknown = await response.json()
+      const result = await api.post<{ reply: string }>('/chat', {
+        messages: conversation.slice(-20),
+      }, { signal: controller.signal })
 
-      if (!response.ok) {
-        const message = (
-          typeof result === 'object'
-          && result !== null
-          && 'error' in result
-          && typeof result.error === 'string'
-        ) ? result.error : 'Não foi possível enviar sua mensagem.'
-        throw new Error(message)
-      }
-
-      if (
-        typeof result !== 'object'
-        || result === null
-        || !('reply' in result)
-        || typeof result.reply !== 'string'
-      ) {
+      if (typeof result.reply !== 'string' || result.reply.trim() === '') {
         throw new Error('O servidor retornou uma resposta inválida.')
       }
 
-      const reply = result.reply
       setMessages((currentMessages) => [
         ...currentMessages,
-        { role: 'assistant', content: reply },
+        { role: 'assistant', content: result.reply },
       ])
     } catch (error) {
       if (!controller.signal.aborted) {
-        setChatError(
-          error instanceof TypeError
-            ? 'Não foi possível conectar ao backend. Verifique se o servidor está em execução.'
-            : error instanceof Error
-              ? error.message
-              : 'Ocorreu um erro ao enviar sua mensagem.',
-        )
+        setChatError(errorMessage(error))
       }
     } finally {
       if (activeRequest.current === controller) {
@@ -105,7 +73,7 @@ const HeaderComponent = ({ title }: HeaderComponentProp) => {
   }
 
   const startNewConversation = () => {
-    setMessages([welcomeMessage])
+    setMessages([])
     setDraft('')
     setChatError('')
   }
@@ -120,7 +88,8 @@ const HeaderComponent = ({ title }: HeaderComponentProp) => {
           onClick={() => setIsDrawerOpen(true)}
           type="button"
         >
-          <img src={menuIcon} alt="" width={25} height={25} />
+          <span aria-hidden="true" className="material-icons">auto_awesome</span>
+          <span>Chatbot com IA</span>
         </button>
         <h1>{title}</h1>
         <UserButton />
@@ -173,8 +142,9 @@ const HeaderComponent = ({ title }: HeaderComponentProp) => {
                   <p>Preparando uma resposta...</p>
                 </div>
               )}
-              {messages.length === 1 && (
+              {messages.length === 0 && (
                 <div className="chat-suggestions">
+                  <p>Faça uma pergunta sobre seus produtos e vendas.</p>
                   <span>Você pode perguntar</span>
                   {suggestedPrompts.map((prompt) => (
                     <button key={prompt} onClick={() => setDraft(prompt)} type="button">{prompt}</button>
@@ -189,6 +159,7 @@ const HeaderComponent = ({ title }: HeaderComponentProp) => {
               <textarea
                 id="chat-message"
                 disabled={isSending}
+                maxLength={4000}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {
